@@ -1,0 +1,80 @@
+services:
+  astocks-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astocks-collector-app:latest
+    container_name: astocks-collector-app
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_HOST: astocks-mysql8
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_DATABASE: astocks_collector
+      MYSQL_CHARSET: utf8mb4
+      ASTOCKS_ADJUST: qfq
+      ASTOCKS_DAILY_PROVIDER: sina
+      ASTOCKS_DEFAULT_START_DATE: "19900101"
+      ASTOCKS_DAILY_WINDOW_DAYS: "10"
+      ASTOCKS_REQUEST_INTERVAL_SECONDS: "0.35"
+      ASTOCKS_MAX_RETRIES: "3"
+      ASTOCKS_MAX_WORKERS: "2"
+      ASTOCKS_BATCH_SIZE: "500"
+      ASTOCKS_SCHEDULE_TIME: "17:30"
+      ASTOCKS_TIMEZONE: Asia/Shanghai
+      LOG_LEVEL: INFO
+      LLM_BASE_URL: ${DOCKER_LLM_BASE_URL:-http://172.24.192.1:8317/v1}
+      LLM_MODEL: gpt-5.5
+      LLM_API_KEY: your-api-key-1
+      LLM_TIMEOUT_SECONDS: "120"
+      ANALYSIS_LOOKBACK_DAYS: "90"
+      ANALYSIS_PRESELECT_LIMIT: "80"
+      ANALYSIS_FINAL_LIMIT: "10"
+      T1_LLM_REVIEW_POOL_MULTIPLIER: "2"
+      T1_LLM_SCORE_WEIGHT: "0.20"
+      T1_LLM_MAX_ADJUSTMENT: "0.8"
+      T1_LLM_RANK_PENALTY: "0.02"
+      T1_LLM_AVOID_PENALTY: "2.0"
+      T1_LLM_PROTECTED_TOP_N: "0"
+      T1_LLM_ENTRY_LIMIT_MULTIPLIER: "2"
+      T1_LLM_ADAPTIVE_GATE_ENABLED: "1"
+      T1_LLM_ADAPTIVE_CANDIDATE_COUNT_MAX: "5000"
+      T1_LLM_ADAPTIVE_TOP_PCT_MAX: "5.0"
+      T1_LLM_ADAPTIVE_REJECT_ACTION: "skip"
+      T1_LLM_GATE_TOP_N: "10"
+      T1_LLM_FINAL_PICK_LIMIT: "3"
+      T1_LLM_CANDIDATE_PCT_CHANGE_MAX: "3.5"
+      T1_LLM_REQUIRE_REVIEW: "1"
+      T1_LLM_ALLOWED_ACTIONS: KEEP
+      THREE_DAY_ANALYSIS_LOOKBACK_DAYS: "120"
+      THREE_DAY_PRESELECT_LIMIT: "120"
+      THREE_DAY_FINAL_LIMIT: "20"
+      REALTIME_QUOTE_LIMIT: "300"
+      REALTIME_SIGNAL_LIMIT: "80"
+      REALTIME_DECISION_MODE: llm_review
+      REALTIME_AUTO_INTERVAL_SECONDS: "60"
+      REALTIME_LLM_CANDIDATE_LIMIT: "12"
+      SIMULATION_INITIAL_CASH: "1000000"
+      SIMULATION_ORDER_CASH_PCT: "0.12"
+      SIMULATION_MAX_POSITIONS: "8"
+      SIMULATION_FEE_RATE: "0.0003"
+    ports:
+      - "${ASTOCKS_APP_PORT:-8003}:8000"
+    networks:
+      - astocks-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  astocks-net:
+    external: true

@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+logs
+output
+reports
+web/node_modules
+web/dist
+docker-compose.override.yml

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astocks-collector"
+version = "0.1.0"
+description = "A股历史与每日行情数据采集器"
+requires-python = ">=3.10"
+dependencies = [
+    "akshare>=1.18.0",
+    "pandas>=2.2.0",
+    "PyMySQL>=1.1.0",
+    "APScheduler>=3.10.4",
+    "python-dotenv>=1.0.1",
+    "cryptography>=42.0.0",
+    "tzdata>=2025.2",
+    "requests>=2.32.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.scripts]
+astocks-collector = "astocks_collector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
