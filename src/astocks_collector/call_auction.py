@@ -238,8 +238,54 @@ def build_call_auction_pick_row(
     }
 
 
+def build_call_auction_quote_row(
+    *,
+    trade_date: Any,
+    snapshot_time: datetime,
+    quote: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """构造集合竞价融合快照行，过滤没有有效价格的行情。"""
+
+    symbol = str(quote.get("symbol") or "").strip()
+    name = str(quote.get("name") or "").strip()
+    latest_price = _resolve_auction_price(quote)
+    if not symbol or latest_price <= 0:
+        return None
+    volume = _float_value(quote.get("volume"))
+    amount = _float_value(quote.get("amount"))
+    volume_ratio = _float_value(quote.get("volume_ratio"))
+    turnover_rate = _float_value(quote.get("turnover_rate"))
+    quality_flags = {
+        "priceValid": latest_price > 0,
+        "pctChangeValid": quote.get("pct_change") not in {None, "", "-", "--"},
+        "volumeValid": volume > 0,
+        "amountValid": amount > 0,
+        "volumeRatioValid": volume_ratio > 0,
+        "turnoverRateValid": turnover_rate > 0,
+        "source": str(quote.get("source") or ""),
+    }
+    return {
+        "trade_date": trade_date,
+        "symbol": symbol,
+        "name": name,
+        "exchange": str(quote.get("exchange") or ""),
+        "latest_price": latest_price,
+        "pct_change": _resolve_pct_change(quote, latest_price),
+        "volume": volume,
+        "amount": amount,
+        "volume_ratio": volume_ratio,
+        "turnover_rate": turnover_rate,
+        "amplitude": _float_value(quote.get("amplitude")),
+        "source": str(quote.get("source") or ""),
+        "first_sample_time": snapshot_time,
+        "latest_sample_time": snapshot_time,
+        "quality_flags": json.dumps(quality_flags, ensure_ascii=False),
+        "raw_snapshot": json.dumps(_snapshot_mapping(quote), ensure_ascii=False),
+    }
+
+
 class CallAuctionSelector:
-    """集合竞价 9:20-9:25 快速选股器。"""
+    """集合竞价分阶段采集与快速选股器。"""
 
     def __init__(
         self,
