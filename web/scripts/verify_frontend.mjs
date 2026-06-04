@@ -81,7 +81,13 @@ try {
       hasRealtimeAutoControls: bodyText.includes('自动刷新') && bodyText.includes('自动买卖'),
       hasRealtimePnlAmount: bodyText.includes('总盈亏') && bodyText.includes('持仓浮盈') && bodyText.includes('已实现盈亏'),
       hasRealtimeMarketStatus: bodyText.includes('市场状态') && (bodyText.includes('开盘中') || bodyText.includes('非开盘')),
-      hasT1TradingPage: bodyText.includes('T+1 模拟交易') && bodyText.includes('初始总资产') && bodyText.includes('设置总资产'),
+      hasT1TradingPage:
+        bodyText.includes('T+1 实时模拟工作台') &&
+        bodyText.includes('初始总资产') &&
+        bodyText.includes('设置总资产') &&
+        bodyText.includes('14:05 T+1质量选股') &&
+        bodyText.includes('LLM复核') &&
+        bodyText.includes('14:05质量候选'),
       consoleErrors: filteredErrors,
       canvasCounts,
       screenshots,

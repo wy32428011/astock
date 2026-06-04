@@ -54,6 +54,49 @@ class AppConfig:
     t1_llm_candidate_pct_change_max: float = 3.5
     t1_llm_require_review: int = 1
     t1_llm_allowed_actions: str = "KEEP"
+    t1_quality_enabled: int = 1
+    t1_quality_schedule_time: str = "14:05"
+    t1_quality_execute_trades: int = 1
+    t1_quality_preselect_limit: int = 120
+    t1_quality_final_limit: int = 2
+    t1_quality_min_quote_count: int = 1000
+    t1_quality_min_valid_quote_count: int = 300
+    t1_quality_min_final_score: float = 66.0
+    t1_quality_min_risk_score: float = 55.0
+    t1_quality_max_pct_change: float = 5.8
+    t1_quality_max_amplitude: float = 8.0
+    t1_quality_min_volume_ratio: float = 1.2
+    t1_quality_require_uptrend: int = 1
+    t1_quality_history_lookback_days: int = 30
+    t1_quality_max_volatility_20: float = 4.5
+    t1_quality_max_drawdown_20: float = 12.0
+    t1_quality_gate_enabled: int = 1
+    t1_quality_gate_top_n: int = 10
+    t1_quality_candidate_count_min: int = 20
+    t1_quality_candidate_count_max: int = 300
+    t1_quality_top_pct_avg_max: float = 3.5
+    t1_quality_market_pct_avg_min: float = 0.5
+    t1_quality_market_pct_avg_max: float = 2.0
+    t1_quality_llm_review_limit: int = 20
+    t1_quality_use_llm: int = 1
+    t1_quality_require_llm: int = 1
+    t1_quality_llm_max_tokens: int = 4096
+    t1_quality_autostart_api_scheduler: int = 1
+    call_auction_enabled: int = 1
+    call_auction_start_time: str = "09:15"
+    call_auction_decision_start_time: str = "09:20"
+    call_auction_end_time: str = "09:25"
+    call_auction_auto_interval_seconds: int = 10
+    call_auction_preselect_limit: int = 120
+    call_auction_llm_review_limit: int = 20
+    call_auction_final_limit: int = 5
+    call_auction_require_llm: int = 1
+    call_auction_llm_timeout_seconds: int = 30
+    call_auction_min_pct_change: float = 0.0
+    call_auction_max_pct_change: float = 6.8
+    call_auction_min_volume_ratio: float = 0.5
+    call_auction_min_amount: float = 3000000.0
+    call_auction_min_final_score: float = 55.0
     three_day_analysis_lookback_days: int = 120
     three_day_preselect_limit: int = 120
     three_day_final_limit: int = 20
@@ -174,6 +217,148 @@ class AppConfig:
                 "T1_LLM_ALLOWED_ACTIONS",
                 cls.t1_llm_allowed_actions,
             ),
+            t1_quality_enabled=_read_int(
+                "T1_QUALITY_ENABLED", cls.t1_quality_enabled
+            ),
+            t1_quality_schedule_time=_read_str(
+                "T1_QUALITY_SCHEDULE_TIME", cls.t1_quality_schedule_time
+            ),
+            t1_quality_execute_trades=_read_int(
+                "T1_QUALITY_EXECUTE_TRADES", cls.t1_quality_execute_trades
+            ),
+            t1_quality_preselect_limit=_read_int(
+                "T1_QUALITY_PRESELECT_LIMIT", cls.t1_quality_preselect_limit
+            ),
+            t1_quality_final_limit=_read_int(
+                "T1_QUALITY_FINAL_LIMIT", cls.t1_quality_final_limit
+            ),
+            t1_quality_min_quote_count=_read_int(
+                "T1_QUALITY_MIN_QUOTE_COUNT", cls.t1_quality_min_quote_count
+            ),
+            t1_quality_min_valid_quote_count=_read_int(
+                "T1_QUALITY_MIN_VALID_QUOTE_COUNT", cls.t1_quality_min_valid_quote_count
+            ),
+            t1_quality_min_final_score=_read_float(
+                "T1_QUALITY_MIN_FINAL_SCORE", cls.t1_quality_min_final_score
+            ),
+            t1_quality_min_risk_score=_read_float(
+                "T1_QUALITY_MIN_RISK_SCORE", cls.t1_quality_min_risk_score
+            ),
+            t1_quality_max_pct_change=_read_float(
+                "T1_QUALITY_MAX_PCT_CHANGE", cls.t1_quality_max_pct_change
+            ),
+            t1_quality_max_amplitude=_read_float(
+                "T1_QUALITY_MAX_AMPLITUDE", cls.t1_quality_max_amplitude
+            ),
+            t1_quality_min_volume_ratio=_read_float(
+                "T1_QUALITY_MIN_VOLUME_RATIO", cls.t1_quality_min_volume_ratio
+            ),
+            t1_quality_require_uptrend=_read_int(
+                "T1_QUALITY_REQUIRE_UPTREND", cls.t1_quality_require_uptrend
+            ),
+            t1_quality_history_lookback_days=_read_int(
+                "T1_QUALITY_HISTORY_LOOKBACK_DAYS",
+                cls.t1_quality_history_lookback_days,
+            ),
+            t1_quality_max_volatility_20=_read_float(
+                "T1_QUALITY_MAX_VOLATILITY_20",
+                cls.t1_quality_max_volatility_20,
+            ),
+            t1_quality_max_drawdown_20=_read_float(
+                "T1_QUALITY_MAX_DRAWDOWN_20",
+                cls.t1_quality_max_drawdown_20,
+            ),
+            t1_quality_gate_enabled=_read_int(
+                "T1_QUALITY_GATE_ENABLED", cls.t1_quality_gate_enabled
+            ),
+            t1_quality_gate_top_n=_read_int(
+                "T1_QUALITY_GATE_TOP_N", cls.t1_quality_gate_top_n
+            ),
+            t1_quality_candidate_count_min=_read_int(
+                "T1_QUALITY_CANDIDATE_COUNT_MIN",
+                cls.t1_quality_candidate_count_min,
+            ),
+            t1_quality_candidate_count_max=_read_int(
+                "T1_QUALITY_CANDIDATE_COUNT_MAX",
+                cls.t1_quality_candidate_count_max,
+            ),
+            t1_quality_top_pct_avg_max=_read_float(
+                "T1_QUALITY_TOP_PCT_AVG_MAX",
+                cls.t1_quality_top_pct_avg_max,
+            ),
+            t1_quality_market_pct_avg_min=_read_float(
+                "T1_QUALITY_MARKET_PCT_AVG_MIN",
+                cls.t1_quality_market_pct_avg_min,
+            ),
+            t1_quality_market_pct_avg_max=_read_float(
+                "T1_QUALITY_MARKET_PCT_AVG_MAX",
+                cls.t1_quality_market_pct_avg_max,
+            ),
+            t1_quality_llm_review_limit=_read_int(
+                "T1_QUALITY_LLM_REVIEW_LIMIT",
+                cls.t1_quality_llm_review_limit,
+            ),
+            t1_quality_use_llm=_read_int(
+                "T1_QUALITY_USE_LLM", cls.t1_quality_use_llm
+            ),
+            t1_quality_require_llm=_read_int(
+                "T1_QUALITY_REQUIRE_LLM", cls.t1_quality_require_llm
+            ),
+            t1_quality_llm_max_tokens=_read_int(
+                "T1_QUALITY_LLM_MAX_TOKENS", cls.t1_quality_llm_max_tokens
+            ),
+            t1_quality_autostart_api_scheduler=_read_int(
+                "T1_QUALITY_AUTOSTART_API_SCHEDULER",
+                cls.t1_quality_autostart_api_scheduler,
+            ),
+            call_auction_enabled=_read_int(
+                "CALL_AUCTION_ENABLED", cls.call_auction_enabled
+            ),
+            call_auction_start_time=_read_str(
+                "CALL_AUCTION_START_TIME", cls.call_auction_start_time
+            ),
+            call_auction_decision_start_time=_read_str(
+                "CALL_AUCTION_DECISION_START_TIME",
+                cls.call_auction_decision_start_time,
+            ),
+            call_auction_end_time=_read_str(
+                "CALL_AUCTION_END_TIME", cls.call_auction_end_time
+            ),
+            call_auction_auto_interval_seconds=_read_int(
+                "CALL_AUCTION_AUTO_INTERVAL_SECONDS",
+                cls.call_auction_auto_interval_seconds,
+            ),
+            call_auction_preselect_limit=_read_int(
+                "CALL_AUCTION_PRESELECT_LIMIT", cls.call_auction_preselect_limit
+            ),
+            call_auction_llm_review_limit=_read_int(
+                "CALL_AUCTION_LLM_REVIEW_LIMIT", cls.call_auction_llm_review_limit
+            ),
+            call_auction_final_limit=_read_int(
+                "CALL_AUCTION_FINAL_LIMIT", cls.call_auction_final_limit
+            ),
+            call_auction_require_llm=_read_int(
+                "CALL_AUCTION_REQUIRE_LLM", cls.call_auction_require_llm
+            ),
+            call_auction_llm_timeout_seconds=_read_int(
+                "CALL_AUCTION_LLM_TIMEOUT_SECONDS",
+                cls.call_auction_llm_timeout_seconds,
+            ),
+            call_auction_min_pct_change=_read_float(
+                "CALL_AUCTION_MIN_PCT_CHANGE", cls.call_auction_min_pct_change
+            ),
+            call_auction_max_pct_change=_read_float(
+                "CALL_AUCTION_MAX_PCT_CHANGE", cls.call_auction_max_pct_change
+            ),
+            call_auction_min_volume_ratio=_read_float(
+                "CALL_AUCTION_MIN_VOLUME_RATIO", cls.call_auction_min_volume_ratio
+            ),
+            call_auction_min_amount=_read_float(
+                "CALL_AUCTION_MIN_AMOUNT", cls.call_auction_min_amount
+            ),
+            call_auction_min_final_score=_read_float(
+                "CALL_AUCTION_MIN_FINAL_SCORE", cls.call_auction_min_final_score
+            ),
             three_day_analysis_lookback_days=_read_int(
                 "THREE_DAY_ANALYSIS_LOOKBACK_DAYS",
                 cls.three_day_analysis_lookback_days,
@@ -284,6 +469,103 @@ class AppConfig:
             raise ValueError("T1_LLM_ALLOWED_ACTIONS 至少需要包含一个动作")
         if not allowed_actions <= {"BOOST", "KEEP", "DOWNRANK", "AVOID"}:
             raise ValueError("T1_LLM_ALLOWED_ACTIONS 只能包含 BOOST、KEEP、DOWNRANK、AVOID")
+        if self.t1_quality_enabled not in {0, 1}:
+            raise ValueError("T1_QUALITY_ENABLED 只能是 0 或 1")
+        if self.t1_quality_execute_trades not in {0, 1}:
+            raise ValueError("T1_QUALITY_EXECUTE_TRADES 只能是 0 或 1")
+        if self.t1_quality_preselect_limit <= 0:
+            raise ValueError("T1_QUALITY_PRESELECT_LIMIT 必须是正整数")
+        if self.t1_quality_final_limit <= 0:
+            raise ValueError("T1_QUALITY_FINAL_LIMIT 必须是正整数")
+        if self.t1_quality_min_quote_count <= 0:
+            raise ValueError("T1_QUALITY_MIN_QUOTE_COUNT 必须是正整数")
+        if self.t1_quality_min_valid_quote_count <= 0:
+            raise ValueError("T1_QUALITY_MIN_VALID_QUOTE_COUNT 必须是正整数")
+        if self.t1_quality_min_final_score < 0:
+            raise ValueError("T1_QUALITY_MIN_FINAL_SCORE 不能小于 0")
+        if self.t1_quality_min_risk_score < 0:
+            raise ValueError("T1_QUALITY_MIN_RISK_SCORE 不能小于 0")
+        if self.t1_quality_max_pct_change < 0:
+            raise ValueError("T1_QUALITY_MAX_PCT_CHANGE 不能小于 0")
+        if self.t1_quality_max_amplitude < 0:
+            raise ValueError("T1_QUALITY_MAX_AMPLITUDE 不能小于 0")
+        if self.t1_quality_min_volume_ratio < 0:
+            raise ValueError("T1_QUALITY_MIN_VOLUME_RATIO 不能小于 0")
+        if self.t1_quality_require_uptrend not in {0, 1}:
+            raise ValueError("T1_QUALITY_REQUIRE_UPTREND 只能是 0 或 1")
+        if self.t1_quality_history_lookback_days < 20:
+            raise ValueError("T1_QUALITY_HISTORY_LOOKBACK_DAYS 至少需要 20")
+        if self.t1_quality_max_volatility_20 < 0:
+            raise ValueError("T1_QUALITY_MAX_VOLATILITY_20 不能小于 0")
+        if self.t1_quality_max_drawdown_20 < 0:
+            raise ValueError("T1_QUALITY_MAX_DRAWDOWN_20 不能小于 0")
+        if self.t1_quality_gate_enabled not in {0, 1}:
+            raise ValueError("T1_QUALITY_GATE_ENABLED 只能是 0 或 1")
+        if self.t1_quality_gate_top_n <= 0:
+            raise ValueError("T1_QUALITY_GATE_TOP_N 必须是正整数")
+        if self.t1_quality_candidate_count_min < 0:
+            raise ValueError("T1_QUALITY_CANDIDATE_COUNT_MIN 不能小于 0")
+        if self.t1_quality_candidate_count_max < 0:
+            raise ValueError("T1_QUALITY_CANDIDATE_COUNT_MAX 不能小于 0")
+        if (
+            self.t1_quality_candidate_count_max > 0
+            and self.t1_quality_candidate_count_min > self.t1_quality_candidate_count_max
+        ):
+            raise ValueError("T1_QUALITY_CANDIDATE_COUNT_MIN 不能大于最大值")
+        if self.t1_quality_top_pct_avg_max < 0:
+            raise ValueError("T1_QUALITY_TOP_PCT_AVG_MAX 不能小于 0")
+        if self.t1_quality_market_pct_avg_min > self.t1_quality_market_pct_avg_max:
+            raise ValueError("T1_QUALITY_MARKET_PCT_AVG_MIN 不能大于最大值")
+        if self.t1_quality_llm_review_limit <= 0:
+            raise ValueError("T1_QUALITY_LLM_REVIEW_LIMIT 必须是正整数")
+        if self.t1_quality_use_llm not in {0, 1}:
+            raise ValueError("T1_QUALITY_USE_LLM 只能是 0 或 1")
+        if self.t1_quality_require_llm not in {0, 1}:
+            raise ValueError("T1_QUALITY_REQUIRE_LLM 只能是 0 或 1")
+        if self.t1_quality_llm_max_tokens <= 0:
+            raise ValueError("T1_QUALITY_LLM_MAX_TOKENS 必须是正整数")
+        if self.t1_quality_autostart_api_scheduler not in {0, 1}:
+            raise ValueError("T1_QUALITY_AUTOSTART_API_SCHEDULER 只能是 0 或 1")
+        if self.call_auction_enabled not in {0, 1}:
+            raise ValueError("CALL_AUCTION_ENABLED 只能是 0 或 1")
+        start_time = _parse_clock_time(
+            self.call_auction_start_time, "CALL_AUCTION_START_TIME"
+        )
+        decision_start_time = _parse_clock_time(
+            self.call_auction_decision_start_time,
+            "CALL_AUCTION_DECISION_START_TIME",
+        )
+        end_time = _parse_clock_time(self.call_auction_end_time, "CALL_AUCTION_END_TIME")
+        if start_time >= decision_start_time:
+            raise ValueError(
+                "CALL_AUCTION_START_TIME 必须早于 CALL_AUCTION_DECISION_START_TIME"
+            )
+        if decision_start_time >= end_time:
+            raise ValueError(
+                "CALL_AUCTION_DECISION_START_TIME 必须早于 CALL_AUCTION_END_TIME"
+            )
+        if self.call_auction_auto_interval_seconds <= 0:
+            raise ValueError("CALL_AUCTION_AUTO_INTERVAL_SECONDS 必须是正整数")
+        if self.call_auction_preselect_limit <= 0:
+            raise ValueError("CALL_AUCTION_PRESELECT_LIMIT 必须是正整数")
+        if self.call_auction_llm_review_limit <= 0:
+            raise ValueError("CALL_AUCTION_LLM_REVIEW_LIMIT 必须是正整数")
+        if self.call_auction_final_limit <= 0:
+            raise ValueError("CALL_AUCTION_FINAL_LIMIT 必须是正整数")
+        if self.call_auction_require_llm not in {0, 1}:
+            raise ValueError("CALL_AUCTION_REQUIRE_LLM 只能是 0 或 1")
+        if self.call_auction_llm_timeout_seconds <= 0:
+            raise ValueError("CALL_AUCTION_LLM_TIMEOUT_SECONDS 必须是正整数")
+        if self.call_auction_min_pct_change < 0:
+            raise ValueError("CALL_AUCTION_MIN_PCT_CHANGE 不能小于 0")
+        if self.call_auction_max_pct_change <= self.call_auction_min_pct_change:
+            raise ValueError("CALL_AUCTION_MAX_PCT_CHANGE 必须大于最小涨幅")
+        if self.call_auction_min_volume_ratio < 0:
+            raise ValueError("CALL_AUCTION_MIN_VOLUME_RATIO 不能小于 0")
+        if self.call_auction_min_amount < 0:
+            raise ValueError("CALL_AUCTION_MIN_AMOUNT 不能小于 0")
+        if self.call_auction_min_final_score < 0:
+            raise ValueError("CALL_AUCTION_MIN_FINAL_SCORE 不能小于 0")
         if self.three_day_analysis_lookback_days < 60:
             raise ValueError("THREE_DAY_ANALYSIS_LOOKBACK_DAYS 至少需要 60")
         if self.three_day_preselect_limit <= 0:
@@ -370,3 +652,17 @@ def _read_float(name: str, default: float) -> float:
 
     value = os.getenv(name)
     return default if value is None or value == "" else float(value)
+
+
+def _parse_clock_time(value: str, name: str) -> tuple[int, int]:
+    """解析 HH:MM 时间配置，用于启动时校验交易窗口。"""
+
+    try:
+        hour_text, minute_text = value.strip().split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须使用 HH:MM 格式") from exc
+    if hour not in range(24) or minute not in range(60):
+        raise ValueError(f"{name} 的小时或分钟超出范围")
+    return hour, minute

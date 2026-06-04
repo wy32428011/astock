@@ -114,6 +114,68 @@ export type RealtimeRunResult = {
   marketSession: string;
 };
 
+export type CallAuctionMarketStatus = {
+  now: string;
+  marketOpen: boolean;
+  session: 'call_auction' | 'closed' | string;
+  reason: string;
+  window: string;
+};
+
+export type CallAuctionRun = {
+  id?: number;
+  runId?: number | null;
+  tradeDate: string | null;
+  snapshotTime: string | null;
+  triggerType: string;
+  status: string;
+  quoteCount: number;
+  validQuoteCount: number;
+  candidateCount: number;
+  pickCount: number;
+  llmRequired: boolean;
+  llmSuccess: boolean;
+  marketSession: string;
+  skipped?: boolean;
+  skipReason: string;
+  errorMessage: string;
+  summary?: Record<string, unknown>;
+  createdAt?: string | null;
+};
+
+export type CallAuctionPick = {
+  id: number;
+  runId: number;
+  rank: number;
+  tradeDate: string;
+  snapshotTime: string;
+  symbol: string;
+  name: string;
+  latestPrice: number;
+  pctChange: number;
+  volume: number;
+  amount: number;
+  volumeRatio: number;
+  turnoverRate: number;
+  priceScore: number;
+  volumeScore: number;
+  trendScore: number;
+  riskScore: number;
+  quantScore: number;
+  llmScore: number | null;
+  finalScore: number;
+  action: 'BUY_CANDIDATE' | 'WATCH' | string;
+  reason: string;
+  risk: string;
+};
+
+export type CallAuctionDashboard = {
+  latestRun: CallAuctionRun | null;
+  picks: CallAuctionPick[];
+  marketStatus: CallAuctionMarketStatus;
+  autoIntervalSeconds: number;
+};
+
 export type StockRow = {
   symbol: string;
   name: string;
@@ -293,6 +355,20 @@ export function runRealtimeAnalysis(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ limit, execute_trades: executeTrades, decision_mode: decisionMode }),
+  });
+}
+
+// 读取集合竞价 LLM 快速选股看板。
+export function fetchCallAuctionDashboard(finalLimit = 20) {
+  return requestJson<CallAuctionDashboard>(`/api/call-auction?finalLimit=${finalLimit}`);
+}
+
+// 执行一次集合竞价 LLM 快速选股。
+export function runCallAuction(finalLimit = 5, force = false) {
+  return requestJson<CallAuctionRun>('/api/call-auction/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ finalLimit, force }),
   });
 }
 

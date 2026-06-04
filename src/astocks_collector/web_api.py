@@ -16,8 +16,13 @@ import astocks_collector.t1_api_routes  # noqa: F401
 from pydantic import BaseModel, Field
 from pymysql.err import OperationalError
 
+from astocks_collector.call_auction import CallAuctionSelector
 from astocks_collector.config import AppConfig
 from astocks_collector.db import MySQLRepository
+from astocks_collector.t1_quality_scheduler import (
+    start_api_t1_quality_scheduler,
+    stop_api_t1_quality_scheduler,
+)
 from astocks_collector.t1_trading import T1TradingEngine
 from astocks_collector.realtime import RealtimeTradingEngine
 from astocks_collector.three_day_analysis import ThreeDayTrendAnalyzer
@@ -40,6 +45,19 @@ class ThreeDayRunRequest(BaseModel):
     use_llm: bool = True
 
 
+class CallAuctionRunRequest(BaseModel):
+    """集合竞价 LLM 快速选股运行请求参数。"""
+
+    final_limit: int | None = Field(default=None, ge=1, le=50)
+    finalLimit: int | None = Field(default=None, ge=1, le=50)
+    force: bool = False
+
+    def limit(self) -> int | None:
+        """兼容前端 camelCase 和后端 snake_case 字段。"""
+
+        return self.finalLimit if self.finalLimit is not None else self.final_limit
+
+
 class SimulationResetRequest(BaseModel):
     """模拟账户重置请求参数。"""
 
@@ -53,6 +71,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     repository = MySQLRepository(app_config)
 
     app = FastAPI(title="A股数据采集器 API", version="0.1.0")
+
+    @app.on_event("startup")
+    def _start_t1_quality_scheduler() -> None:
+        """API 进程启动时注册 14:05 T+1 质量选股调度器。"""
+        start_api_t1_quality_scheduler(app_config)
+
+    @app.on_event("shutdown")
+    def _stop_t1_quality_scheduler() -> None:
+        """API 进程关闭时停止 T+1 质量选股调度器。"""
+        stop_api_t1_quality_scheduler()
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -379,6 +408,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "llmFallback": result.llm_fallback,
             "data": _json_rows(result.picks),
         }
+
+    @app.get("/api/call-auction")
+    def call_auction_dashboard(finalLimit: int = 20) -> dict[str, Any]:
+        """返回集合竞价 LLM 快速选股看板数据。"""
+
+        repository.ensure_schema()
+        selector = CallAuctionSelector(app_config, repository)
+        return {
+            "latestRun": repository.latest_call_auction_run(),
+            "picks": repository.latest_call_auction_picks(limit=finalLimit),
+            "marketStatus": selector.market_status(),
+            "autoIntervalSeconds": app_config.call_auction_auto_interval_seconds,
+        }
+
+    @app.post("/api/call-auction/run")
+    def run_call_auction(request: CallAuctionRunRequest | None = None) -> dict[str, Any]:
+        """执行一次集合竞价 LLM 快速选股。"""
+
+        payload = request or CallAuctionRunRequest()
+        result = CallAuctionSelector(app_config, repository).run_once(
+            final_limit=payload.limit(),
+            force=payload.force,
+            trigger_type="api",
+        )
+        return result.to_dict()
 
     @app.get("/api/realtime")
     def realtime_dashboard() -> dict[str, Any]:

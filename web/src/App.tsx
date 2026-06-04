@@ -21,7 +21,9 @@ import {
 } from '@ant-design/pro-components';
 import { Alert, App as AntdApp, Badge, Button, ConfigProvider, Input, Row, Col, Select, Space, Switch, Tag, Typography } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import gsap from 'gsap';
+import { useGSAP } from '@gsap/react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type AnalysisPick,
   type AnalysisResponse,
@@ -48,10 +50,49 @@ import {
   runRealtimeAnalysis,
   runThreeDayAnalysis,
 } from './api';
+import { T1QualitySection } from './T1QualitySection';
 import { T1TradingSection } from './T1TradingSection';
+import { CallAuctionSection } from './CallAuctionSection';
 import { AntvChart } from './components/AntvChart';
 
 const { Statistic } = StatisticCard;
+
+// 判断用户系统是否要求减少动态效果。
+function shouldReduceMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// 页面切换动效容器，使用 GSAP 作用域避免影响其他页面节点。
+function AnimatedRoutePane({ routeKey, children }: { routeKey: string; children: ReactNode }) {
+  const routeRef = useRef<HTMLDivElement | null>(null);
+
+  useGSAP(() => {
+    const routeNode = routeRef.current;
+    if (!routeNode || shouldReduceMotion()) return;
+
+    const blocks = Array.from(
+      routeNode.querySelectorAll('.ant-pro-card, .ant-card, .ant-alert, .ant-pro-table'),
+    );
+    gsap.fromTo(
+      routeNode,
+      { autoAlpha: 0, y: 8, filter: 'blur(3px)' },
+      { autoAlpha: 1, y: 0, filter: 'blur(0px)', duration: 0.28, ease: 'power2.out', overwrite: 'auto' },
+    );
+    if (blocks.length > 0) {
+      gsap.fromTo(
+        blocks,
+        { autoAlpha: 0, y: 10 },
+        { autoAlpha: 1, y: 0, duration: 0.34, ease: 'power2.out', stagger: 0.035, overwrite: 'auto' },
+      );
+    }
+  }, { scope: routeRef, dependencies: [routeKey], revertOnUpdate: true });
+
+  return (
+    <div ref={routeRef} className="animated-route-pane">
+      {children}
+    </div>
+  );
+}
 
 const financeTheme = {
   token: {
@@ -532,8 +573,10 @@ function DashboardApp() {
           { path: '/history', name: '历史数据', icon: <LineChartOutlined /> },
           { path: '/analysis', name: '分析数据', icon: <ProfileOutlined /> },
           { path: '/three-day-analysis', name: '3日分析', icon: <LineChartOutlined /> },
+          { path: '/call-auction', name: '集合竞价', icon: <ClockCircleOutlined /> },
           { path: '/realtime', name: '实时交易', icon: <ThunderboltOutlined /> },
           { path: '/t1-trading', name: 'T+1交易', icon: <RetweetOutlined /> },
+          { path: '/t1-quality', name: '14:05质量选股', icon: <ClockCircleOutlined /> },
         ]}
         menuItemRender={(item, dom) => (
           <button
@@ -574,88 +617,92 @@ function DashboardApp() {
             </Button>
           }
         >
-          <Space direction="vertical" size={16} className="page-stack">
-            {dataError && <Alert showIcon type="warning" message={dataError} />}
-            {pathname === '/overview' && (
-              <OverviewSection overview={overview} analysis={analysis} threeDayAnalysis={threeDayAnalysis} />
-            )}
-            {pathname === '/stocks' && <StocksSection columns={stockColumns} />}
-            {pathname === '/segments' && <SegmentsSection segments={segments} />}
-            {pathname === '/history' && (
-              <HistorySection
-                history={history}
-                symbol={historySymbol}
-                onSymbolChange={async (symbol) => {
-                  const normalizedSymbol = symbol.trim();
-                  if (!normalizedSymbol) {
-                    message.warning('请输入股票代码');
-                    return;
-                  }
-                  setHistorySymbol(normalizedSymbol);
-                  setLoading(true);
-                  try {
-                    setHistory(await fetchHistory(normalizedSymbol));
-                  } catch (error) {
-                    setHistory(null);
-                    message.error(error instanceof Error ? error.message : '历史数据加载失败');
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
-              />
-            )}
-            {pathname === '/analysis' && (
-              <AnalysisSection analysis={analysis} columns={analysisColumns} />
-            )}
-            {pathname === '/three-day-analysis' && (
-              <ThreeDayAnalysisSection
-                analysis={threeDayAnalysis}
-                columns={threeDayColumns}
-                loading={threeDayLoading}
-                onRun={() => void handleRunThreeDayAnalysis()}
-                onRefresh={async () => {
-                  setThreeDayLoading(true);
-                  try {
-                    setThreeDayAnalysis(await fetchThreeDayAnalysis());
-                  } catch (error) {
-                    message.error(error instanceof Error ? error.message : '3日分析刷新失败');
-                  } finally {
-                    setThreeDayLoading(false);
-                  }
-                }}
-              />
-            )}
-            {pathname === '/realtime' && (
-              <RealtimeSection
-                realtime={realtime}
-                loading={realtimeLoading}
-                autoTaskRunning={autoTaskRunning}
-                autoRefreshEnabled={autoRefreshEnabled}
-                autoTradeEnabled={autoTradeEnabled}
-                refreshIntervalSec={refreshIntervalSec}
-                decisionMode={decisionMode}
-                lastRealtimeRefreshAt={lastRealtimeRefreshAt}
-                nextRealtimeRefreshAt={nextRealtimeRefreshAt}
-                countdownSec={countdownSec}
-                autoTaskError={autoTaskError}
-                autoSkippedCount={autoSkippedCount}
-                signalColumns={signalColumns}
-                positionColumns={positionColumns}
-                orderColumns={orderColumns}
-                onRefresh={() => void loadRealtimeData()}
-                onRun={() => void handleRunRealtime(true)}
-                onReset={handleResetSimulation}
-                onAutoRefreshChange={(checked) => {
-                  setAutoRefreshEnabled(checked);
-                  if (!checked) setAutoTradeEnabled(false);
-                }}
-                onAutoTradeChange={setAutoTradeEnabled}
-                onIntervalChange={setRefreshIntervalSec}
-                onDecisionModeChange={setDecisionMode}
-              />
-            )}
-            {pathname === '/t1-trading' && <T1TradingSection />}
-          </Space>
+          <AnimatedRoutePane routeKey={pathname}>
+            <Space direction="vertical" size={16} className="page-stack">
+              {dataError && <Alert showIcon type="warning" message={dataError} />}
+              {pathname === '/overview' && (
+                <OverviewSection overview={overview} analysis={analysis} threeDayAnalysis={threeDayAnalysis} />
+              )}
+              {pathname === '/stocks' && <StocksSection columns={stockColumns} />}
+              {pathname === '/segments' && <SegmentsSection segments={segments} />}
+              {pathname === '/history' && (
+                <HistorySection
+                  history={history}
+                  symbol={historySymbol}
+                  onSymbolChange={async (symbol) => {
+                    const normalizedSymbol = symbol.trim();
+                    if (!normalizedSymbol) {
+                      message.warning('请输入股票代码');
+                      return;
+                    }
+                    setHistorySymbol(normalizedSymbol);
+                    setLoading(true);
+                    try {
+                      setHistory(await fetchHistory(normalizedSymbol));
+                    } catch (error) {
+                      setHistory(null);
+                      message.error(error instanceof Error ? error.message : '历史数据加载失败');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                />
+              )}
+              {pathname === '/analysis' && (
+                <AnalysisSection analysis={analysis} columns={analysisColumns} />
+              )}
+              {pathname === '/three-day-analysis' && (
+                <ThreeDayAnalysisSection
+                  analysis={threeDayAnalysis}
+                  columns={threeDayColumns}
+                  loading={threeDayLoading}
+                  onRun={() => void handleRunThreeDayAnalysis()}
+                  onRefresh={async () => {
+                    setThreeDayLoading(true);
+                    try {
+                      setThreeDayAnalysis(await fetchThreeDayAnalysis());
+                    } catch (error) {
+                      message.error(error instanceof Error ? error.message : '3日分析刷新失败');
+                    } finally {
+                      setThreeDayLoading(false);
+                    }
+                  }}
+                />
+              )}
+              {pathname === '/call-auction' && <CallAuctionSection />}
+              {pathname === '/realtime' && (
+                <RealtimeSection
+                  realtime={realtime}
+                  loading={realtimeLoading}
+                  autoTaskRunning={autoTaskRunning}
+                  autoRefreshEnabled={autoRefreshEnabled}
+                  autoTradeEnabled={autoTradeEnabled}
+                  refreshIntervalSec={refreshIntervalSec}
+                  decisionMode={decisionMode}
+                  lastRealtimeRefreshAt={lastRealtimeRefreshAt}
+                  nextRealtimeRefreshAt={nextRealtimeRefreshAt}
+                  countdownSec={countdownSec}
+                  autoTaskError={autoTaskError}
+                  autoSkippedCount={autoSkippedCount}
+                  signalColumns={signalColumns}
+                  positionColumns={positionColumns}
+                  orderColumns={orderColumns}
+                  onRefresh={() => void loadRealtimeData()}
+                  onRun={() => void handleRunRealtime(true)}
+                  onReset={handleResetSimulation}
+                  onAutoRefreshChange={(checked) => {
+                    setAutoRefreshEnabled(checked);
+                    if (!checked) setAutoTradeEnabled(false);
+                  }}
+                  onAutoTradeChange={setAutoTradeEnabled}
+                  onIntervalChange={setRefreshIntervalSec}
+                  onDecisionModeChange={setDecisionMode}
+                />
+              )}
+              {pathname === '/t1-trading' && <T1TradingSection />}
+              {pathname === '/t1-quality' && <T1QualitySection />}
+            </Space>
+          </AnimatedRoutePane>
         </PageContainer>
       </ProLayout>
   );
@@ -1229,8 +1276,10 @@ function pageTitle(pathname: string) {
     '/history': '历史数据',
     '/analysis': '分析数据',
     '/three-day-analysis': '全A股未来3个交易日涨势分析',
+    '/call-auction': '集合竞价LLM快速选股',
     '/realtime': '实时分析与模拟交易',
     '/t1-trading': 'T+1模拟交易',
+    '/t1-quality': '14:05盘中质量选股',
   };
   return map[pathname] || '数据概览';
 }
@@ -1244,8 +1293,10 @@ function normalizePathname(pathname: string) {
     '/history',
     '/analysis',
     '/three-day-analysis',
+    '/call-auction',
     '/realtime',
     '/t1-trading',
+    '/t1-quality',
   ]);
   if (!pathname || pathname === '/') return '/overview';
   return allowedPathnames.has(pathname) ? pathname : '/overview';

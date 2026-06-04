@@ -5,16 +5,24 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
+from astocks_collector.call_auction import CallAuctionSelector
 from astocks_collector.analysis import T1StockAnalyzer
 from astocks_collector.collector import CollectResult, StockCollector
 from astocks_collector.config import AppConfig
 from astocks_collector.db import MySQLRepository
 from astocks_collector.realtime import RealtimeTradingEngine
 from astocks_collector.scheduler import run_scheduler
+from astocks_collector.t1_task_manager import (
+    DEFAULT_PRESELECT_LIMIT,
+    T1TaskConfig,
+    normalize_interval_seconds,
+    t1_task_manager,
+)
 from astocks_collector.three_day_analysis import ThreeDayTrendAnalyzer
 
 
@@ -88,6 +96,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_format_analysis_result(result))
         return 0
 
+    if args.command == "t1-loop":
+        task_config = T1TaskConfig(
+            interval_seconds=normalize_interval_seconds(args.interval_seconds),
+            preselect_limit=args.preselect_limit,
+            final_limit=args.final_limit,
+            execute_trades=not args.no_trade,
+            use_llm=not args.no_llm,
+            run_analysis=not args.no_analysis,
+        )
+        status = t1_task_manager.start(config, task_config)
+        print("T+1 长期模型任务已启动，按 Ctrl+C 手动停止：", _json_like(status))
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            status = t1_task_manager.stop(config)
+            print("T+1 长期模型任务已停止：", _json_like(status))
+        return 0
+
     if args.command == "analyze-3d":
         result = ThreeDayTrendAnalyzer(config).analyze(
             preselect_limit=args.preselect_limit,
@@ -113,6 +140,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             decision_mode=args.decision_mode,
         )
+        return 0
+
+    if args.command == "call-auction-once":
+        result = CallAuctionSelector(config).run_once(
+            final_limit=args.final_limit,
+            force=args.force,
+            trigger_type="cli",
+        )
+        print(_format_call_auction_result(result))
+        return 0
+
+    if args.command == "call-auction-loop":
+        selector = CallAuctionSelector(config)
+        interval = args.interval_seconds or config.call_auction_auto_interval_seconds
+        print(f"集合竞价 LLM 快速选股循环已启动，间隔 {interval} 秒，按 Ctrl+C 停止")
+        try:
+            while True:
+                result = selector.run_once(
+                    final_limit=args.final_limit,
+                    force=args.force,
+                    trigger_type="loop",
+                )
+                print(_format_call_auction_result(result))
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print("集合竞价 LLM 快速选股循环已停止")
         return 0
 
     if args.command == "sim-reset":
@@ -182,6 +235,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只使用量化预筛，不调用大模型",
     )
+    t1_loop = subparsers.add_parser(
+        "t1-loop", help="长期运行 T+1 模型和模拟任务，直到手动停止"
+    )
+    t1_loop.add_argument(
+        "--interval-seconds", type=int, default=60, help="长期任务轮询间隔秒数"
+    )
+    t1_loop.add_argument(
+        "--preselect-limit", type=int, default=DEFAULT_PRESELECT_LIMIT, help="量化预筛数量"
+    )
+    t1_loop.add_argument("--final-limit", type=int, default=20, help="最终候选数量")
+    t1_loop.add_argument(
+        "--no-llm", action="store_true", help="长期任务中不调用大模型"
+    )
+    t1_loop.add_argument(
+        "--no-trade", action="store_true", help="长期任务中只刷新模型，不执行模拟交易"
+    )
+    t1_loop.add_argument(
+        "--no-analysis", action="store_true", help="长期任务中不刷新 T+1 模型"
+    )
     analyze_3d = subparsers.add_parser(
         "analyze-3d", help="筛选未来 3 个交易日涨势较好的全 A 股候选"
     )
@@ -218,6 +290,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     realtime_loop.add_argument(
         "--interval-seconds", type=int, default=60, help="循环间隔秒数"
+    )
+    call_auction_once = subparsers.add_parser(
+        "call-auction-once", help="执行一次 9:20-9:25 集合竞价 LLM 快速选股"
+    )
+    call_auction_once.add_argument(
+        "--final-limit", type=int, default=None, help="最终输出候选数量"
+    )
+    call_auction_once.add_argument(
+        "--force", action="store_true", help="跳过时间窗口限制，仅用于调试补跑"
+    )
+    call_auction_loop = subparsers.add_parser(
+        "call-auction-loop", help="循环执行集合竞价 LLM 快速选股"
+    )
+    call_auction_loop.add_argument(
+        "--interval-seconds", type=int, default=None, help="循环间隔秒数"
+    )
+    call_auction_loop.add_argument(
+        "--final-limit", type=int, default=None, help="最终输出候选数量"
+    )
+    call_auction_loop.add_argument(
+        "--force", action="store_true", help="跳过时间窗口限制，仅用于调试补跑"
     )
     sim_reset = subparsers.add_parser("sim-reset", help="重置默认模拟交易账户")
     sim_reset.add_argument(
@@ -287,6 +380,20 @@ def _export_config_to_env(config: AppConfig) -> None:
         "REALTIME_DECISION_MODE": config.realtime_decision_mode,
         "REALTIME_AUTO_INTERVAL_SECONDS": config.realtime_auto_interval_seconds,
         "REALTIME_LLM_CANDIDATE_LIMIT": config.realtime_llm_candidate_limit,
+        "CALL_AUCTION_ENABLED": config.call_auction_enabled,
+        "CALL_AUCTION_START_TIME": config.call_auction_start_time,
+        "CALL_AUCTION_END_TIME": config.call_auction_end_time,
+        "CALL_AUCTION_AUTO_INTERVAL_SECONDS": config.call_auction_auto_interval_seconds,
+        "CALL_AUCTION_PRESELECT_LIMIT": config.call_auction_preselect_limit,
+        "CALL_AUCTION_LLM_REVIEW_LIMIT": config.call_auction_llm_review_limit,
+        "CALL_AUCTION_FINAL_LIMIT": config.call_auction_final_limit,
+        "CALL_AUCTION_REQUIRE_LLM": config.call_auction_require_llm,
+        "CALL_AUCTION_LLM_TIMEOUT_SECONDS": config.call_auction_llm_timeout_seconds,
+        "CALL_AUCTION_MIN_PCT_CHANGE": config.call_auction_min_pct_change,
+        "CALL_AUCTION_MAX_PCT_CHANGE": config.call_auction_max_pct_change,
+        "CALL_AUCTION_MIN_VOLUME_RATIO": config.call_auction_min_volume_ratio,
+        "CALL_AUCTION_MIN_AMOUNT": config.call_auction_min_amount,
+        "CALL_AUCTION_MIN_FINAL_SCORE": config.call_auction_min_final_score,
         "SIMULATION_INITIAL_CASH": config.simulation_initial_cash,
         "SIMULATION_ORDER_CASH_PCT": config.simulation_order_cash_pct,
         "SIMULATION_MAX_POSITIONS": config.simulation_max_positions,
@@ -381,6 +488,17 @@ def _format_realtime_result(result) -> str:
         f"订单={result.order_count} 模式={result.decision_mode} "
         f"LLM使用={result.llm_used} LLM降级={result.llm_fallback} "
         f"开盘={result.market_open} 跳过={result.skipped} {result.skip_reason}"
+    )
+
+
+def _format_call_auction_result(result) -> str:
+    """格式化集合竞价 LLM 快速选股结果。"""
+
+    return (
+        f"快照={result.snapshot_time} 状态={result.status} 行情={result.quote_count} "
+        f"有效={result.valid_quote_count} 规则候选={result.candidate_count} "
+        f"LLM通过={result.pick_count} LLM成功={result.llm_success} "
+        f"跳过={result.skipped} {result.skip_reason or result.error_message}"
     )
 
 

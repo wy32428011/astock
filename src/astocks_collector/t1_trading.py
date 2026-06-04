@@ -137,20 +137,45 @@ class T1TradingEngine:
     def dashboard(self, final_limit: int = 20) -> dict[str, Any]:
         """读取 T+1 专属页面需要的账户、持仓、订单和候选数据。"""
         self.repository.ensure_schema()
+        snapshot_time = self._now()
+        market_status = self._market_status(snapshot_time)
+        use_realtime_quotes = bool(market_status.get("marketOpen"))
+        quotes: list[dict[str, Any]] = []
+        quote_map: dict[str, dict[str, Any]] = {}
+        price_source = "daily_fallback"
         with self.repository.connection() as conn:
             self._ensure_schema(conn)
             account = self._ensure_account(conn)
             analysis_date = self._latest_analysis_date(conn)
             trade_date = self._default_trade_date(conn, analysis_date)
-            valuation_trade_date = trade_date or self._now().date()
-            self._refresh_positions(conn, valuation_trade_date)
+            latest_trade_date = self._latest_trade_date(conn)
+            valuation_trade_date = trade_date or latest_trade_date or snapshot_time.date()
+            candidate_trade_date = trade_date or latest_trade_date
+            picks = self._load_candidates(conn, analysis_date, candidate_trade_date, final_limit) if analysis_date and candidate_trade_date else []
+            quote_symbols = self._dashboard_quote_symbols(conn, picks)
+            if use_realtime_quotes and quote_symbols:
+                quotes = self._fetch_realtime_quotes(snapshot_time, quote_symbols)
+                quote_map = {str(item["symbol"]): item for item in quotes}
+            if quote_map:
+                self._refresh_positions_with_quotes(conn, snapshot_time.date(), quote_map)
+                price_source = "realtime"
+            else:
+                self._refresh_position_availability(conn, valuation_trade_date)
+                price_source = "last_known"
             self._recalculate_account(conn)
             account = self._ensure_account(conn)
             conn.commit()
             positions = self._load_positions(conn)
             orders = self._load_orders(conn)
-            candidate_trade_date = trade_date or self._latest_trade_date(conn)
-            picks = self._load_candidates(conn, analysis_date, candidate_trade_date, final_limit) if analysis_date and candidate_trade_date else []
+            if quote_map:
+                picks = self._apply_realtime_quotes_to_candidates(picks, quote_map)
+        market_status.update(
+            {
+                "quoteCount": 0,
+                "quoteTime": _datetime_to_str(snapshot_time) if quotes else None,
+                "priceSource": price_source,
+            }
+        )
         return {
             "account": account,
             "positions": positions,
@@ -163,7 +188,7 @@ class T1TradingEngine:
                 "positionCount": len(positions),
                 "unavailablePositionCount": sum(1 for item in positions if int(item.get("availableQuantity") or 0) <= 0),
             },
-            "marketStatus": self._market_status(),
+            "marketStatus": market_status,
         }
 
     def run_once(self, execute_trades: bool = True, final_limit: int = 20) -> T1TradingRunResult:
@@ -175,12 +200,30 @@ class T1TradingEngine:
             analysis_date = self._latest_analysis_date(conn)
             if not analysis_date:
                 conn.commit()
-                return T1TradingRunResult(None, None, 0, 0, 0, 0, True, "尚未生成 T+1 分析结果")
+                return T1TradingRunResult(
+                    analysis_date=None,
+                    trade_date=None,
+                    candidate_count=0,
+                    buy_count=0,
+                    sell_count=0,
+                    order_count=0,
+                    skipped=True,
+                    skip_reason="尚未生成 T+1 分析结果",
+                )
 
             trade_date = self._default_trade_date(conn, analysis_date)
             if not trade_date:
                 conn.commit()
-                return T1TradingRunResult(analysis_date, None, 0, 0, 0, 0, True, "尚无晚于分析日的 T+1 交易日行情")
+                return T1TradingRunResult(
+                    analysis_date=analysis_date,
+                    trade_date=None,
+                    candidate_count=0,
+                    buy_count=0,
+                    sell_count=0,
+                    order_count=0,
+                    skipped=True,
+                    skip_reason="尚无晚于分析日的 T+1 交易日行情",
+                )
 
             candidates = self._load_candidates(conn, analysis_date, trade_date, final_limit)
             self._refresh_positions(conn, trade_date)
@@ -200,6 +243,46 @@ class T1TradingEngine:
                 sell_count=sell_count,
                 order_count=buy_count + sell_count,
             )
+
+    def execute_quality_buys(
+        self,
+        trade_date: date,
+        candidates: Sequence[dict[str, Any]],
+        execute_trades: bool = True,
+    ) -> int:
+        """执行 14:05 T+1 质量候选买入，返回真实买入数量。"""
+        self.repository.ensure_schema()
+        with self.repository.connection() as conn:
+            self._ensure_schema(conn)
+            account = self._ensure_account(conn)
+            self._refresh_positions(conn, trade_date)
+            if not execute_trades:
+                conn.commit()
+                return 0
+            normalized_candidates = [
+                self._quality_candidate_to_dict(candidate) for candidate in candidates
+            ]
+            buy_count = self._execute_buys(
+                conn,
+                account,
+                trade_date,
+                trade_date,
+                [candidate for candidate in normalized_candidates if candidate["price"] > 0],
+            )
+            self._recalculate_account(conn)
+            conn.commit()
+            return buy_count
+
+    def _quality_candidate_to_dict(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """将盘中质量候选转换为 T+1 买入候选格式。"""
+        return {
+            "symbol": str(candidate.get("symbol") or ""),
+            "name": str(candidate.get("name") or ""),
+            "price": _to_decimal(candidate.get("price") or candidate.get("latestPrice")),
+            "finalScore": candidate.get("finalScore"),
+            "reason": candidate.get("reason"),
+            "risk": candidate.get("risk"),
+        }
 
     def run_realtime_once(self, execute_trades: bool = True, final_limit: int = 20) -> T1TradingRunResult:
         """按实时行情执行一次 T+1 模拟交易。"""
@@ -223,8 +306,6 @@ class T1TradingEngine:
                 skip_reason=str(market_status.get("reason") or "非开盘时间"),
             )
 
-        quotes = self._fetch_realtime_quotes(snapshot_time)
-        quote_map = {str(item["symbol"]): item for item in quotes}
         with self.repository.connection() as conn:
             self._ensure_schema(conn)
             account = self._ensure_account(conn)
@@ -238,7 +319,7 @@ class T1TradingEngine:
                     0,
                     0,
                     0,
-                    len(quotes),
+                    0,
                     True,
                     True,
                     market_session,
@@ -249,7 +330,27 @@ class T1TradingEngine:
             trade_date = snapshot_time.date()
             fallback_trade_date = self._default_trade_date(conn, analysis_date) or self._latest_trade_date(conn)
             candidates = self._load_candidates(conn, analysis_date, fallback_trade_date, final_limit)
+            quote_symbols = self._realtime_quote_symbols(conn, candidates)
+            quotes = self._fetch_realtime_quotes(snapshot_time, quote_symbols)
+            quote_map = {str(item["symbol"]): item for item in quotes}
+            if not quote_map:
+                conn.commit()
+                return T1TradingRunResult(
+                    analysis_date=analysis_date,
+                    trade_date=trade_date,
+                    candidate_count=len(candidates),
+                    buy_count=0,
+                    sell_count=0,
+                    order_count=0,
+                    quote_count=0,
+                    realtime=True,
+                    market_open=True,
+                    market_session=market_session,
+                    skipped=True,
+                    skip_reason="实时行情为空，已跳过本轮",
+                )
             candidates = self._apply_realtime_quotes_to_candidates(candidates, quote_map)
+            realtime_candidates = [item for item in candidates if item.get("quoteSource") == "realtime"]
             self._refresh_positions_with_quotes(conn, trade_date, quote_map)
             if not execute_trades:
                 conn.commit()
@@ -267,7 +368,7 @@ class T1TradingEngine:
                 )
 
             sell_count = self._execute_sells(conn, account, analysis_date, trade_date)
-            buy_count = self._execute_buys(conn, account, analysis_date, trade_date, candidates)
+            buy_count = self._execute_buys(conn, account, analysis_date, trade_date, realtime_candidates)
             self._recalculate_account(conn)
             conn.commit()
             return T1TradingRunResult(
@@ -483,10 +584,12 @@ class T1TradingEngine:
             rows = cursor.fetchall() or []
         return [self._candidate_to_dict(row) for row in rows]
 
-    def _fetch_realtime_quotes(self, snapshot_time: datetime) -> list[dict[str, Any]]:
-        """读取并规范化真实实时行情。"""
+    def _fetch_realtime_quotes(
+        self, snapshot_time: datetime, symbols: Sequence[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """读取并规范化真实实时行情，可按持仓和候选股定向拉取。"""
         try:
-            raw_quotes = self.market_data.fetch_realtime_quotes()
+            raw_quotes = self.market_data.fetch_realtime_quotes(symbols)
         except Exception:
             raw_quotes = []
         quotes: list[dict[str, Any]] = []
@@ -549,6 +652,30 @@ class T1TradingEngine:
                     (available, price, market_value, floating_pnl, self.account_id, row["symbol"]),
                 )
 
+    def _refresh_position_availability(self, conn: Any, trade_date: date) -> None:
+        """只刷新 T+1 可卖数量，保留已有实时估值价格。"""
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM t1_simulation_position WHERE account_id=%s", (self.account_id,))
+            positions = cursor.fetchall() or []
+        if not positions:
+            return
+        with conn.cursor() as cursor:
+            for row in positions:
+                quantity = int(row["quantity"])
+                available = quantity if is_t1_position_available(
+                    _to_date(row["buy_trade_date"]) or trade_date,
+                    _to_date(row["available_from_date"]) or trade_date,
+                    trade_date,
+                ) else 0
+                cursor.execute(
+                    """
+                    UPDATE t1_simulation_position
+                    SET available_quantity=%s
+                    WHERE account_id=%s AND symbol=%s
+                    """,
+                    (available, self.account_id, row["symbol"]),
+                )
+
     def _refresh_positions_with_quotes(
         self,
         conn: Any,
@@ -561,20 +688,28 @@ class T1TradingEngine:
             positions = cursor.fetchall() or []
         if not positions:
             return
-        missing_symbols = [row["symbol"] for row in positions if row["symbol"] not in quote_map]
-        fallback_prices = self._load_prices(conn, missing_symbols, self._latest_trade_date(conn) or trade_date)
         with conn.cursor() as cursor:
             for row in positions:
                 quote = quote_map.get(row["symbol"])
-                price = _to_decimal(quote.get("latest_price")) if quote else fallback_prices.get(row["symbol"], _to_decimal(row["last_price"]))
                 quantity = int(row["quantity"])
-                market_value = (price * Decimal(quantity)).quantize(Decimal("0.01"))
-                floating_pnl = (market_value - _to_decimal(row["avg_cost"]) * Decimal(quantity)).quantize(Decimal("0.01"))
                 available = quantity if is_t1_position_available(
                     _to_date(row["buy_trade_date"]) or trade_date,
                     _to_date(row["available_from_date"]) or trade_date,
                     trade_date,
                 ) else 0
+                if not quote:
+                    cursor.execute(
+                        """
+                        UPDATE t1_simulation_position
+                        SET available_quantity=%s
+                        WHERE account_id=%s AND symbol=%s
+                        """,
+                        (available, self.account_id, row["symbol"]),
+                    )
+                    continue
+                price = _to_decimal(quote.get("latest_price"))
+                market_value = (price * Decimal(quantity)).quantize(Decimal("0.01"))
+                floating_pnl = (market_value - _to_decimal(row["avg_cost"]) * Decimal(quantity)).quantize(Decimal("0.01"))
                 cursor.execute(
                     """
                     UPDATE t1_simulation_position
@@ -832,6 +967,31 @@ class T1TradingEngine:
             cursor.execute(sql, (self.adjust_type, trade_date, *symbols))
             rows = cursor.fetchall() or []
         return {row["symbol"]: _to_decimal(row["close_price"]) for row in rows}
+
+    def _dashboard_quote_symbols(self, conn: Any, picks: Sequence[dict[str, Any]]) -> list[str]:
+        """整理看板刷新需要的持仓和候选股代码。"""
+
+        return self._quote_symbols_from(self._held_symbols(conn), picks)
+
+    def _realtime_quote_symbols(self, conn: Any, candidates: Sequence[dict[str, Any]]) -> list[str]:
+        """整理实时任务执行需要的持仓和候选股代码。"""
+
+        return self._quote_symbols_from(self._held_symbols(conn), candidates)
+
+    def _quote_symbols_from(
+        self, held_symbols: Sequence[str], candidates: Sequence[dict[str, Any]]
+    ) -> list[str]:
+        """将持仓和候选股代码合并去重，保持稳定顺序便于行情接口批量请求。"""
+
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for symbol in [*held_symbols, *(str(item.get("symbol") or "") for item in candidates)]:
+            digits = "".join(ch for ch in str(symbol) if ch.isdigit())
+            normalized = digits[-6:].zfill(6) if digits else ""
+            if normalized and normalized not in seen:
+                symbols.append(normalized)
+                seen.add(normalized)
+        return symbols
 
     def _held_symbols(self, conn: Any) -> list[str]:
         """读取当前持仓股票代码。"""

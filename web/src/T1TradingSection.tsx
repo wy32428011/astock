@@ -25,7 +25,9 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import gsap from 'gsap';
+import { useGSAP } from '@gsap/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const { Text } = Typography;
 
@@ -91,8 +93,11 @@ interface T1TaskStatus {
   status: string;
   running: boolean;
   intervalSeconds: number;
+  preselectLimit: number;
   finalLimit: number;
   executeTrades: boolean;
+  useLlm: boolean;
+  runAnalysis: boolean;
   runCount: number;
   lastRunAt?: string;
   nextRunAt?: string;
@@ -115,6 +120,9 @@ interface T1Dashboard {
     marketOpen?: boolean;
     session?: string;
     reason?: string;
+    quoteCount?: number;
+    quoteTime?: string;
+    priceSource?: string;
   };
   task?: T1TaskStatus;
 }
@@ -132,6 +140,59 @@ interface T1RunResult {
   marketSession?: string;
   skipped: boolean;
   skipReason?: string;
+}
+
+interface T1QualityRun {
+  id?: number;
+  runId?: number;
+  tradeDate?: string;
+  snapshotTime?: string;
+  triggerType?: string;
+  status?: string;
+  quoteCount?: number;
+  validQuoteCount?: number;
+  candidateCount?: number;
+  pickCount?: number;
+  buyCount?: number;
+  sellCount?: number;
+  executeTrades?: boolean;
+  llmRequired?: boolean;
+  llmSuccess?: boolean;
+  marketSession?: string;
+  skipped?: boolean;
+  skipReason?: string;
+  errorMessage?: string;
+  createdAt?: string;
+}
+
+interface T1QualityPick {
+  id: number;
+  runId: number;
+  rank: number;
+  tradeDate?: string;
+  snapshotTime?: string;
+  symbol: string;
+  name: string;
+  latestPrice: number;
+  pctChange: number;
+  volumeRatio: number;
+  turnoverRate: number;
+  trendScore: number;
+  momentumScore: number;
+  liquidityScore: number;
+  riskScore: number;
+  quantScore: number;
+  llmScore?: number | null;
+  finalScore: number;
+  action?: string;
+  expectedDirection?: string;
+  reason?: string;
+  risk?: string;
+}
+
+interface T1QualityDashboard {
+  latestRun?: T1QualityRun | null;
+  picks: T1QualityPick[];
 }
 
 /** T+1 页面通用请求方法。 */
@@ -161,25 +222,51 @@ function pnlColor(value?: number): string {
   return (value ?? 0) >= 0 ? '#cf1322' : '#389e0d';
 }
 
+/** 判断用户系统是否启用了减少动态效果。 */
+function shouldReduceT1Motion(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 /** T+1 专属模拟交易和实时任务工作台。 */
 export function T1TradingSection() {
+  const motionScopeRef = useRef<HTMLDivElement | null>(null);
   const [dashboard, setDashboard] = useState<T1Dashboard | null>(null);
+  const [qualityDashboard, setQualityDashboard] = useState<T1QualityDashboard | null>(null);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [qualityRunning, setQualityRunning] = useState(false);
   const [taskRunning, setTaskRunning] = useState(false);
   const [initialCashInput, setInitialCashInput] = useState<number | null>(null);
   const [taskIntervalSec, setTaskIntervalSec] = useState(60);
   const [messageApi, contextHolder] = message.useMessage();
+  const dashboardReady = Boolean(dashboard);
+  const liveMotionKey = [
+    dashboard?.account.totalAsset,
+    dashboard?.account.totalPnl,
+    dashboard?.account.cash,
+    dashboard?.summary.positionCount,
+    dashboard?.orders.length,
+    dashboard?.task?.running,
+    dashboard?.marketStatus?.quoteTime,
+  ].join('|');
 
-  const loadDashboard = useCallback(async () => {
-    setLoading(true);
+  const loadDashboard = useCallback(async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
     try {
-      const data = await requestJson<T1Dashboard>('/api/t1-trading');
+      const [data, quality] = await Promise.all([
+        requestJson<T1Dashboard>('/api/t1-trading'),
+        requestJson<T1QualityDashboard>('/api/t1-quality'),
+      ]);
       setDashboard(data);
+      setQualityDashboard(quality);
     } catch (error) {
       messageApi.error(`加载 T+1 页面失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [messageApi]);
 
@@ -227,19 +314,23 @@ export function T1TradingSection() {
     }
   }, [loadDashboard, messageApi]);
 
-  const runT1Analysis = useCallback(async () => {
-    setRunning(true);
+  const runT1Quality = useCallback(async (force = false) => {
+    setQualityRunning(true);
     try {
-      await requestJson('/api/t1-analysis/run', {
+      const result = await requestJson<T1QualityRun>('/api/t1-quality/run', {
         method: 'POST',
-        body: JSON.stringify({ preselectLimit: 120, finalLimit: 20 }),
+        body: JSON.stringify({ executeTrades: true, finalLimit: 20, force }),
       });
-      messageApi.success('T+1 分析已完成');
+      if (result.skipped || result.status === 'SKIPPED') {
+        messageApi.warning(result.skipReason || '14:05 T+1质量选股已跳过');
+      } else {
+        messageApi.success(`14:05质量选股完成：候选 ${result.pickCount ?? 0}，买入 ${result.buyCount ?? 0}`);
+      }
       await loadDashboard();
     } catch (error) {
-      messageApi.error(`运行 T+1 分析失败：${error instanceof Error ? error.message : String(error)}`);
+      messageApi.error(`运行14:05质量选股失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      setRunning(false);
+      setQualityRunning(false);
     }
   }, [loadDashboard, messageApi]);
 
@@ -266,9 +357,16 @@ export function T1TradingSection() {
     try {
       await requestJson<T1TaskStatus>('/api/t1-trading/task/start', {
         method: 'POST',
-        body: JSON.stringify({ intervalSeconds: taskIntervalSec, finalLimit: 20, executeTrades: true }),
+        body: JSON.stringify({
+          intervalSeconds: taskIntervalSec,
+          preselectLimit: 120,
+          finalLimit: 20,
+          executeTrades: true,
+          useLlm: true,
+          runAnalysis: true,
+        }),
       });
-      messageApi.success('T+1 到期执行任务已启动');
+      messageApi.success('T+1 模型长期任务已启动，手动停止前会持续运行');
       await loadDashboard();
     } catch (error) {
       messageApi.error(`启动任务失败：${error instanceof Error ? error.message : String(error)}`);
@@ -281,7 +379,7 @@ export function T1TradingSection() {
     setTaskRunning(true);
     try {
       await requestJson<T1TaskStatus>('/api/t1-trading/task/stop', { method: 'POST' });
-      messageApi.success('T+1 到期执行任务已停止');
+      messageApi.success('T+1 模型长期任务已停止');
       await loadDashboard();
     } catch (error) {
       messageApi.error(`停止任务失败：${error instanceof Error ? error.message : String(error)}`);
@@ -295,6 +393,24 @@ export function T1TradingSection() {
   }, [loadDashboard]);
 
   useEffect(() => {
+    if (!dashboard?.task?.running && !dashboard?.marketStatus?.marketOpen) {
+      return undefined;
+    }
+    const intervalMs = dashboard?.marketStatus?.marketOpen
+      ? 5000
+      : Math.min(Math.max((dashboard?.task?.intervalSeconds || 60) * 1000, 5000), 30000);
+    const timer = window.setInterval(() => {
+      void loadDashboard(true);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [
+    dashboard?.marketStatus?.marketOpen,
+    dashboard?.task?.intervalSeconds,
+    dashboard?.task?.running,
+    loadDashboard,
+  ]);
+
+  useEffect(() => {
     if (dashboard?.account.initialCash && initialCashInput === null) {
       setInitialCashInput(dashboard.account.initialCash);
     }
@@ -305,6 +421,31 @@ export function T1TradingSection() {
       setTaskIntervalSec(dashboard.task.intervalSeconds);
     }
   }, [dashboard?.task?.intervalSeconds]);
+
+  useGSAP(() => {
+    const scopeNode = motionScopeRef.current;
+    if (!scopeNode || !dashboardReady || shouldReduceT1Motion()) return;
+
+    const blocks = Array.from(scopeNode.querySelectorAll('.t1-animate-item'));
+    gsap.fromTo(
+      blocks,
+      { autoAlpha: 0, y: 12 },
+      { autoAlpha: 1, y: 0, duration: 0.36, ease: 'power2.out', stagger: 0.04, overwrite: 'auto' },
+    );
+  }, { scope: motionScopeRef, dependencies: [dashboardReady], revertOnUpdate: true });
+
+  useGSAP(() => {
+    const scopeNode = motionScopeRef.current;
+    if (!scopeNode || !dashboardReady || shouldReduceT1Motion()) return;
+
+    const liveCards = Array.from(scopeNode.querySelectorAll('.t1-live-value'));
+    if (liveCards.length === 0) return;
+    gsap.fromTo(
+      liveCards,
+      { backgroundColor: 'rgba(15, 118, 110, 0.08)', scale: 0.992 },
+      { backgroundColor: '#ffffff', scale: 1, duration: 0.62, ease: 'power2.out', overwrite: 'auto' },
+    );
+  }, { scope: motionScopeRef, dependencies: [liveMotionKey] });
 
   const positionColumns = useMemo<ColumnsType<T1Position>>(() => [
     { title: '代码', dataIndex: 'symbol', width: 110, fixed: 'left' },
@@ -342,6 +483,24 @@ export function T1TradingSection() {
     { title: '风险', dataIndex: 'risk', ellipsis: true },
   ], []);
 
+  const qualityColumns = useMemo<ColumnsType<T1QualityPick>>(() => [
+    { title: '排名', dataIndex: 'rank', width: 80 },
+    { title: '代码', dataIndex: 'symbol', width: 110 },
+    { title: '名称', dataIndex: 'name', width: 120 },
+    { title: '最新价', dataIndex: 'latestPrice', align: 'right', render: (value: number) => value.toFixed(3) },
+    { title: '涨跌幅', dataIndex: 'pctChange', align: 'right', render: (value: number) => `${value.toFixed(2)}%` },
+    { title: '综合分', dataIndex: 'finalScore', align: 'right', render: score },
+    { title: '量化分', dataIndex: 'quantScore', align: 'right', render: score },
+    { title: 'LLM分', dataIndex: 'llmScore', align: 'right', render: score },
+    { title: '趋势', dataIndex: 'trendScore', align: 'right', render: score },
+    { title: '动量', dataIndex: 'momentumScore', align: 'right', render: score },
+    { title: '流动性', dataIndex: 'liquidityScore', align: 'right', render: score },
+    { title: '风险', dataIndex: 'riskScore', align: 'right', render: score },
+    { title: '动作', dataIndex: 'action', width: 90, render: (value: string) => <Tag color={value === 'BUY' ? 'red' : 'blue'}>{value || '-'}</Tag> },
+    { title: '理由', dataIndex: 'reason', ellipsis: true },
+    { title: '风险提示', dataIndex: 'risk', ellipsis: true },
+  ], []);
+
   const orderColumns = useMemo<ColumnsType<T1Order>>(() => [
     { title: '时间', dataIndex: 'createdAt', width: 170 },
     { title: '代码', dataIndex: 'symbol', width: 110 },
@@ -364,35 +523,41 @@ export function T1TradingSection() {
   const account = dashboard?.account;
   const task = dashboard?.task;
   const marketOpen = dashboard?.marketStatus?.marketOpen === true;
+  const quoteStatus = dashboard?.marketStatus?.priceSource === 'realtime'
+    ? `实时行情 ${dashboard?.marketStatus?.quoteCount ?? 0}`
+    : dashboard?.marketStatus?.marketOpen
+      ? '实时行情暂缺'
+      : '最近估值';
   const taskStatusColor = task?.running ? 'processing' : 'default';
 
   return (
+    <div ref={motionScopeRef} className="t1-motion-scope">
     <Space direction="vertical" size={16} className="t1-workbench">
       {contextHolder}
 
-      <section className="t1-command-bar">
+      <section className="t1-command-bar t1-animate-item">
         <div>
           <Space size={8} wrap>
             <Text strong>T+1 实时模拟工作台</Text>
             <Tag color="blue">模拟交易</Tag>
             <Tag color={marketOpen ? 'red' : 'default'}>{marketOpen ? '开盘中' : '非开盘'}</Tag>
-            <Badge status={taskStatusColor} text={task?.running ? '任务运行中' : '任务已停止'} />
+            <Badge status={taskStatusColor} text={task?.running ? '模型长期运行中' : '模型已停止'} />
           </Space>
           <div className="t1-subline">
-            分析日 {dashboard?.analysisDate || '-'} · T+1交易日 {dashboard?.tradeDate || '-'} · 下次到期 {task?.nextRunAt || '-'}
+            分析日 {dashboard?.analysisDate || '-'} · T+1交易日 {dashboard?.tradeDate || '-'} · {quoteStatus} · 下次循环 {task?.nextRunAt || '-'}
           </div>
         </div>
-        <Button icon={<ReloadOutlined />} loading={loading} onClick={loadDashboard}>刷新</Button>
+        <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadDashboard()}>刷新</Button>
       </section>
 
       <Row gutter={[12, 12]}>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" className="t1-metric-card">
+          <Card size="small" className="t1-metric-card t1-animate-item t1-live-value">
             <Statistic title="总资产" value={account?.totalAsset ?? 0} formatter={(value) => money(Number(value))} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" className="t1-metric-card">
+          <Card size="small" className="t1-metric-card t1-animate-item t1-live-value">
             <Statistic
               title="总盈亏"
               value={account?.totalPnl ?? 0}
@@ -402,12 +567,12 @@ export function T1TradingSection() {
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" className="t1-metric-card">
+          <Card size="small" className="t1-metric-card t1-animate-item t1-live-value">
             <Statistic title="现金" value={account?.cash ?? 0} formatter={(value) => money(Number(value))} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <Card size="small" className="t1-metric-card">
+          <Card size="small" className="t1-metric-card t1-animate-item t1-live-value">
             <Statistic
               title="可卖 / 持仓"
               value={(dashboard?.summary.positionCount ?? 0) - (dashboard?.summary.unavailablePositionCount ?? 0)}
@@ -419,11 +584,11 @@ export function T1TradingSection() {
 
       <Row gutter={[12, 12]} align="stretch">
         <Col xs={24} xl={15}>
-          <Card title="交易操作" size="small" className="t1-control-card">
+          <Card title="交易操作" size="small" className="t1-control-card t1-animate-item">
             <Space direction="vertical" size={14} style={{ width: '100%' }}>
               <Space wrap>
-                <Button icon={<FundProjectionScreenOutlined />} loading={running} onClick={runT1Analysis}>
-                  运行T+1分析
+                <Button icon={<FundProjectionScreenOutlined />} loading={taskRunning} onClick={startT1Task}>
+                  启动T+1模型
                 </Button>
                 <Button icon={<PlayCircleOutlined />} loading={running} onClick={() => runT1Trading(false)}>
                   预演
@@ -434,17 +599,25 @@ export function T1TradingSection() {
                 <Button type="primary" icon={<ThunderboltOutlined />} loading={running} onClick={runT1RealtimeTrading}>
                   实时执行一次
                 </Button>
+                <Button icon={<FundProjectionScreenOutlined />} loading={qualityRunning} onClick={() => runT1Quality(false)}>
+                  运行14:05质量选股
+                </Button>
+                <Button loading={qualityRunning} onClick={() => runT1Quality(true)}>
+                  强制调试运行
+                </Button>
               </Space>
               <Space wrap>
-                <InputNumber
-                  min={1}
-                  step={10000}
-                  precision={2}
-                  value={initialCashInput ?? account?.initialCash ?? 1000000}
-                  onChange={(value) => setInitialCashInput(typeof value === 'number' ? value : Number(value || 0))}
-                  addonBefore="初始总资产"
-                  style={{ width: 240 }}
-                />
+                <Space.Compact>
+                  <span className="t1-input-addon">初始总资产</span>
+                  <InputNumber
+                    min={1}
+                    step={10000}
+                    precision={2}
+                    value={initialCashInput ?? account?.initialCash ?? 1000000}
+                    onChange={(value) => setInitialCashInput(typeof value === 'number' ? value : Number(value || 0))}
+                    style={{ width: 150 }}
+                  />
+                </Space.Compact>
                 <Button danger icon={<WalletOutlined />} loading={running} onClick={resetT1Account}>
                   设置总资产
                 </Button>
@@ -454,10 +627,10 @@ export function T1TradingSection() {
           </Card>
         </Col>
         <Col xs={24} xl={9}>
-          <Card title="到期执行任务" size="small" className="t1-control-card">
+          <Card title="T+1模型长期任务" size="small" className="t1-control-card t1-animate-item">
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <Space wrap>
-                <Tag color={task?.running ? 'green' : 'default'}>{task?.running ? '运行中' : '已停止'}</Tag>
+                <Tag color={task?.running ? 'green' : 'default'}>{task?.running ? '模型运行中' : '已停止'}</Tag>
                 <Select
                   value={taskIntervalSec}
                   style={{ width: 120 }}
@@ -465,10 +638,10 @@ export function T1TradingSection() {
                   options={[15, 30, 60, 120].map((value) => ({ value, label: `${value} 秒` }))}
                 />
                 <Button type="primary" icon={<PlayCircleOutlined />} loading={taskRunning} onClick={startT1Task}>
-                  启动任务
+                  启动模型
                 </Button>
                 <Button danger icon={<StopOutlined />} loading={taskRunning} onClick={stopT1Task}>
-                  停止任务
+                  手动停止
                 </Button>
               </Space>
               <div className="t1-task-grid">
@@ -481,14 +654,37 @@ export function T1TradingSection() {
         </Col>
       </Row>
 
+      <Card title="14:05 T+1质量选股" size="small" className="t1-control-card t1-animate-item">
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <Tag color={qualityDashboard?.latestRun?.status === 'SUCCESS' ? 'green' : qualityDashboard?.latestRun?.status === 'SKIPPED' ? 'orange' : 'default'}>
+              {qualityDashboard?.latestRun?.status || '暂无运行'}
+            </Tag>
+            <Tag color={qualityDashboard?.latestRun?.llmSuccess ? 'purple' : 'default'}>
+              LLM复核{qualityDashboard?.latestRun?.llmSuccess ? '成功' : '等待/失败'}
+            </Tag>
+            <Text type="secondary">交易日 {qualityDashboard?.latestRun?.tradeDate || '-'}</Text>
+            <Text type="secondary">快照 {qualityDashboard?.latestRun?.snapshotTime || '-'}</Text>
+          </Space>
+          <div className="t1-task-grid">
+            <span>行情数量</span><strong>{qualityDashboard?.latestRun?.quoteCount ?? 0}</strong>
+            <span>有效行情</span><strong>{qualityDashboard?.latestRun?.validQuoteCount ?? 0}</strong>
+            <span>候选数量</span><strong>{qualityDashboard?.latestRun?.pickCount ?? 0}</strong>
+            <span>买入数量</span><strong>{qualityDashboard?.latestRun?.buyCount ?? 0}</strong>
+            <span>最近状态</span><strong>{qualityDashboard?.latestRun?.skipReason || qualityDashboard?.latestRun?.errorMessage || '-'}</strong>
+          </div>
+        </Space>
+      </Card>
+
       <Alert
+        className="t1-animate-item"
         type="info"
         showIcon
         message="T+1 专属规则"
-        description="实时执行会读取真实实时行情价格撮合模拟单；买入当日不可卖，下一交易日起释放可卖数量。所有交易均为模拟，不连接真实券商。"
+        description="启动 T+1 模型后，后端会长期检查最新交易日、刷新候选结果，并在开盘时读取真实实时行情撮合模拟单；买入当日不可卖，下一交易日起释放可卖数量。所有交易均为模拟，不连接真实券商。"
       />
 
-      <Card size="small" className="t1-data-card">
+      <Card size="small" className="t1-data-card t1-animate-item">
         <Tabs
           items={[
             {
@@ -522,6 +718,21 @@ export function T1TradingSection() {
               ),
             },
             {
+              key: 'quality-picks',
+              label: `14:05质量候选 ${qualityDashboard?.picks.length ?? 0}`,
+              children: (
+                <Table
+                  rowKey="id"
+                  loading={loading}
+                  dataSource={qualityDashboard?.picks ?? []}
+                  columns={qualityColumns}
+                  size="small"
+                  scroll={{ x: 1680 }}
+                  pagination={{ pageSize: 10 }}
+                />
+              ),
+            },
+            {
               key: 'orders',
               label: `订单 ${dashboard?.orders.length ?? 0}`,
               children: (
@@ -540,5 +751,6 @@ export function T1TradingSection() {
         />
       </Card>
     </Space>
+    </div>
   );
 }

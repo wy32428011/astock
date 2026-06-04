@@ -44,6 +44,20 @@ body {
   width: 100%;
 }
 
+.animated-route-pane,
+.t1-motion-scope {
+  width: 100%;
+}
+
+.animated-route-pane .ant-pro-card,
+.animated-route-pane .ant-card,
+.animated-route-pane .ant-alert,
+.animated-route-pane .ant-pro-table,
+.t1-animate-item {
+  transform-origin: center top;
+  will-change: transform, opacity;
+}
+
 .finance-layout {
   background: var(--finance-bg);
 }
@@ -269,6 +283,24 @@ body {
   padding: 14px 16px;
 }
 
+.t1-live-value {
+  transition: border-color 160ms ease;
+}
+
+.t1-input-addon {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--finance-border);
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  background: var(--finance-panel);
+  color: var(--finance-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .t1-control-card {
   height: 100%;
 }
@@ -288,6 +320,47 @@ body {
   overflow-wrap: anywhere;
 }
 
+.quality-workbench {
+  width: 100%;
+}
+
+.quality-command-bar {
+  border-left-color: var(--finance-warning);
+}
+
+.quality-data-card .ant-card-body {
+  padding: 0;
+}
+
+.quality-table-text {
+  margin: 0;
+  color: var(--finance-muted);
+}
+
+.quality-run-grid {
+  grid-template-columns: 88px minmax(0, 1fr);
+}
+
+.quality-rule-card .ant-typography {
+  margin-bottom: 0;
+}
+
+.call-auction-workbench {
+  width: 100%;
+}
+
+.call-auction-command-bar {
+  border-left-color: var(--finance-gold);
+}
+
+.call-auction-metric {
+  margin-top: 6px;
+  color: var(--finance-red);
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
 @media (max-width: 768px) {
   .ant-pro-page-container-children-container {
     padding-inline: 12px;
@@ -300,5 +373,17 @@ body {
   .t1-command-bar {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated-route-pane .ant-pro-card,
+  .animated-route-pane .ant-card,
+  .animated-route-pane .ant-alert,
+  .animated-route-pane .ant-pro-table,
+  .t1-animate-item {
+    transform: none !important;
+    transition: none !important;
+    will-change: auto;
   }
 }

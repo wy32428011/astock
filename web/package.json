@@ -12,7 +12,9 @@
     "@ant-design/icons": "^6.1.0",
     "@ant-design/pro-components": "^2.8.10",
     "@antv/g2plot": "^2.4.35",
+    "@gsap/react": "^2.1.2",
     "antd": "^5.26.2",
+    "gsap": "^3.15.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

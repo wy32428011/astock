@@ -213,6 +213,66 @@ class MySQLRepository:
                 rows = cursor.fetchall()
         return [str(row["symbol"]) for row in rows]
 
+    def recent_stock_daily_history(
+        self,
+        symbols: Sequence[str],
+        trade_date: Any,
+        lookback_days: int = 30,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """按股票批量读取信号日前最近日线，用于盘中质量选股历史因子。"""
+
+        unique_symbols = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not unique_symbols:
+            return {}
+        lookback = max(1, int(lookback_days))
+        placeholders = ", ".join(["%s"] * len(unique_symbols))
+        sql = f"""
+            SELECT
+                symbol,
+                trade_date,
+                close_price,
+                volume,
+                amount,
+                amplitude,
+                pct_change,
+                turnover_rate
+            FROM (
+                SELECT
+                    symbol,
+                    trade_date,
+                    close_price,
+                    volume,
+                    amount,
+                    amplitude,
+                    pct_change,
+                    turnover_rate,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY symbol
+                        ORDER BY trade_date DESC
+                    ) AS rn
+                FROM stock_daily
+                WHERE adjust_type=%s
+                  AND trade_date < %s
+                  AND symbol IN ({placeholders})
+            ) ranked
+            WHERE rn <= %s
+            ORDER BY symbol ASC, trade_date ASC
+        """
+        params: tuple[Any, ...] = (
+            self.config.adjust_type,
+            trade_date,
+            *unique_symbols,
+            lookback,
+        )
+        history: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in unique_symbols}
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows = cursor.fetchall() or []
+        for row in rows:
+            history.setdefault(str(row.get("symbol") or ""), []).append(dict(row))
+        return history
+
     def table_counts(self) -> dict[str, int]:
         """返回核心表行数，用于验证运行结果。"""
 
@@ -223,6 +283,8 @@ class MySQLRepository:
                     "stock_basic",
                     "stock_daily",
                     "stock_analysis_pick",
+                    "stock_call_auction_run",
+                    "stock_call_auction_pick",
                     "stock_three_day_pick",
                     "stock_realtime_quote",
                     "stock_realtime_signal",
@@ -417,6 +479,262 @@ class MySQLRepository:
             conn.commit()
         return affected
 
+    def insert_t1_quality_run(self, row: Mapping[str, Any]) -> int:
+        """写入一次 T+1 盘中质量选股运行记录，并返回运行编号。"""
+
+        sql = """
+            INSERT INTO stock_t1_intraday_run (
+                trade_date, snapshot_time, trigger_type, status, quote_count,
+                valid_quote_count, candidate_count, pick_count, buy_count,
+                sell_count, execute_trades, llm_required, llm_success,
+                market_session, skip_reason, error_message, summary_json
+            )
+            VALUES (
+                %(trade_date)s, %(snapshot_time)s, %(trigger_type)s, %(status)s,
+                %(quote_count)s, %(valid_quote_count)s, %(candidate_count)s,
+                %(pick_count)s, %(buy_count)s, %(sell_count)s, %(execute_trades)s,
+                %(llm_required)s, %(llm_success)s, %(market_session)s,
+                %(skip_reason)s, %(error_message)s, %(summary_json)s
+            )
+        """
+        payload = dict(row)
+        payload["execute_trades"] = 1 if payload.get("execute_trades") else 0
+        payload["llm_required"] = 1 if payload.get("llm_required") else 0
+        payload["llm_success"] = 1 if payload.get("llm_success") else 0
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, payload)
+                run_id = int(cursor.lastrowid)
+            conn.commit()
+        return run_id
+
+    def update_t1_quality_run(self, run_id: int, updates: Mapping[str, Any]) -> None:
+        """更新 T+1 盘中质量选股运行统计。"""
+
+        allowed = {"status", "pick_count", "buy_count", "sell_count", "skip_reason", "error_message", "summary_json"}
+        values = {key: value for key, value in updates.items() if key in allowed}
+        if not values:
+            return
+        assignments = ", ".join(f"{key}=%s" for key in values)
+        params = [*values.values(), run_id]
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE stock_t1_intraday_run SET {assignments} WHERE id=%s",
+                    params,
+                )
+            conn.commit()
+
+    def replace_t1_quality_picks(self, run_id: int, picks: Sequence[Mapping[str, Any]]) -> int:
+        """替换指定运行编号下的 T+1 盘中质量候选。"""
+
+        sql = """
+            INSERT INTO stock_t1_intraday_pick (
+                run_id, trade_date, snapshot_time, rank_no, symbol, name,
+                latest_price, pct_change, volume_ratio, turnover_rate,
+                trend_score, momentum_score, liquidity_score, risk_score,
+                quant_score, llm_score, final_score, signal_action,
+                expected_direction, reason, risk, factor_snapshot, raw_response
+            )
+            VALUES (
+                %(run_id)s, %(trade_date)s, %(snapshot_time)s, %(rank_no)s,
+                %(symbol)s, %(name)s, %(latest_price)s, %(pct_change)s,
+                %(volume_ratio)s, %(turnover_rate)s, %(trend_score)s,
+                %(momentum_score)s, %(liquidity_score)s, %(risk_score)s,
+                %(quant_score)s, %(llm_score)s, %(final_score)s,
+                %(signal_action)s, %(expected_direction)s, %(reason)s,
+                %(risk)s, %(factor_snapshot)s, %(raw_response)s
+            )
+            ON DUPLICATE KEY UPDATE
+                rank_no=VALUES(rank_no),
+                latest_price=VALUES(latest_price),
+                pct_change=VALUES(pct_change),
+                volume_ratio=VALUES(volume_ratio),
+                turnover_rate=VALUES(turnover_rate),
+                trend_score=VALUES(trend_score),
+                momentum_score=VALUES(momentum_score),
+                liquidity_score=VALUES(liquidity_score),
+                risk_score=VALUES(risk_score),
+                quant_score=VALUES(quant_score),
+                llm_score=VALUES(llm_score),
+                final_score=VALUES(final_score),
+                signal_action=VALUES(signal_action),
+                expected_direction=VALUES(expected_direction),
+                reason=VALUES(reason),
+                risk=VALUES(risk),
+                factor_snapshot=VALUES(factor_snapshot),
+                raw_response=VALUES(raw_response),
+                updated_at=CURRENT_TIMESTAMP
+        """
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM stock_t1_intraday_pick WHERE run_id=%s", (run_id,))
+                affected = cursor.executemany(sql, [dict(item) for item in picks]) if picks else 0
+            conn.commit()
+        return affected
+
+    def latest_t1_quality_run(self) -> dict[str, Any] | None:
+        """读取最近一次 T+1 盘中质量选股运行记录。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM stock_t1_intraday_run
+                    ORDER BY snapshot_time DESC, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cursor.fetchone()
+        return _quality_run_to_dict(row) if row else None
+
+    def latest_t1_quality_picks(self, limit: int = 20) -> list[dict[str, Any]]:
+        """读取最近一次 T+1 盘中质量选股候选。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM stock_t1_intraday_pick
+                    WHERE run_id = (SELECT MAX(id) FROM stock_t1_intraday_run)
+                    ORDER BY rank_no ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = cursor.fetchall() or []
+        return [_quality_pick_to_dict(row) for row in rows]
+
+    def has_successful_t1_quality_run(self, trade_date: Any) -> bool:
+        """判断指定交易日是否已有成功的 T+1 质量选股，避免重复买入。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM stock_t1_intraday_run
+                    WHERE trade_date=%s AND status='SUCCESS'
+                    """,
+                    (trade_date,),
+                )
+                row = cursor.fetchone() or {}
+        return int(row.get("cnt") or 0) > 0
+
+    def insert_call_auction_run(self, row: Mapping[str, Any]) -> int:
+        """写入一次集合竞价选股运行记录，并返回运行编号。"""
+
+        sql = """
+            INSERT INTO stock_call_auction_run (
+                trade_date, snapshot_time, trigger_type, status, quote_count,
+                valid_quote_count, candidate_count, pick_count, llm_required,
+                llm_success, market_session, skip_reason, error_message, summary_json
+            )
+            VALUES (
+                %(trade_date)s, %(snapshot_time)s, %(trigger_type)s, %(status)s,
+                %(quote_count)s, %(valid_quote_count)s, %(candidate_count)s,
+                %(pick_count)s, %(llm_required)s, %(llm_success)s,
+                %(market_session)s, %(skip_reason)s, %(error_message)s,
+                %(summary_json)s
+            )
+        """
+        payload = dict(row)
+        payload["llm_required"] = 1 if payload.get("llm_required") else 0
+        payload["llm_success"] = 1 if payload.get("llm_success") else 0
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, payload)
+                run_id = int(cursor.lastrowid)
+            conn.commit()
+        return run_id
+
+    def replace_call_auction_picks(
+        self, run_id: int, picks: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """替换指定运行编号下的集合竞价候选。"""
+
+        sql = """
+            INSERT INTO stock_call_auction_pick (
+                run_id, trade_date, snapshot_time, rank_no, symbol, name,
+                latest_price, pct_change, volume, amount, volume_ratio,
+                turnover_rate, price_score, volume_score, trend_score,
+                risk_score, quant_score, llm_score, final_score, signal_action,
+                reason, risk, factor_snapshot, raw_response
+            )
+            VALUES (
+                %(run_id)s, %(trade_date)s, %(snapshot_time)s, %(rank_no)s,
+                %(symbol)s, %(name)s, %(latest_price)s, %(pct_change)s,
+                %(volume)s, %(amount)s, %(volume_ratio)s, %(turnover_rate)s,
+                %(price_score)s, %(volume_score)s, %(trend_score)s,
+                %(risk_score)s, %(quant_score)s, %(llm_score)s,
+                %(final_score)s, %(signal_action)s, %(reason)s, %(risk)s,
+                %(factor_snapshot)s, %(raw_response)s
+            )
+            ON DUPLICATE KEY UPDATE
+                rank_no=VALUES(rank_no),
+                latest_price=VALUES(latest_price),
+                pct_change=VALUES(pct_change),
+                volume=VALUES(volume),
+                amount=VALUES(amount),
+                volume_ratio=VALUES(volume_ratio),
+                turnover_rate=VALUES(turnover_rate),
+                price_score=VALUES(price_score),
+                volume_score=VALUES(volume_score),
+                trend_score=VALUES(trend_score),
+                risk_score=VALUES(risk_score),
+                quant_score=VALUES(quant_score),
+                llm_score=VALUES(llm_score),
+                final_score=VALUES(final_score),
+                signal_action=VALUES(signal_action),
+                reason=VALUES(reason),
+                risk=VALUES(risk),
+                factor_snapshot=VALUES(factor_snapshot),
+                raw_response=VALUES(raw_response),
+                updated_at=CURRENT_TIMESTAMP
+        """
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM stock_call_auction_pick WHERE run_id=%s", (run_id,))
+                affected = cursor.executemany(sql, [dict(item) for item in picks]) if picks else 0
+            conn.commit()
+        return affected
+
+    def latest_call_auction_run(self) -> dict[str, Any] | None:
+        """读取最近一次集合竞价选股运行记录。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM stock_call_auction_run
+                    ORDER BY snapshot_time DESC, id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cursor.fetchone()
+        return _call_auction_run_to_dict(row) if row else None
+
+    def latest_call_auction_picks(self, limit: int = 20) -> list[dict[str, Any]]:
+        """读取最近一次集合竞价选股候选。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM stock_call_auction_pick
+                    WHERE run_id = (SELECT MAX(id) FROM stock_call_auction_run)
+                    ORDER BY rank_no ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = cursor.fetchall() or []
+        return [_call_auction_pick_to_dict(row) for row in rows]
+
     def replace_three_day_picks(
         self,
         analysis_date: str,
@@ -591,6 +909,126 @@ class MySQLRepository:
                 UNIQUE KEY uk_analysis_pick_date_symbol (analysis_date, symbol),
                 KEY idx_analysis_pick_date_rank (analysis_date, rank_no)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='T+1 大模型选股结果';
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stock_t1_intraday_run (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '运行编号',
+                trade_date DATE NOT NULL COMMENT '交易日期',
+                snapshot_time DATETIME NOT NULL COMMENT '行情快照时间',
+                trigger_type VARCHAR(16) NOT NULL COMMENT '触发来源: scheduler/api_scheduler/manual',
+                status VARCHAR(16) NOT NULL COMMENT '运行状态: SUCCESS/SKIPPED/FAILED',
+                quote_count INT NOT NULL DEFAULT 0 COMMENT '原始行情数量',
+                valid_quote_count INT NOT NULL DEFAULT 0 COMMENT '有效行情数量',
+                candidate_count INT NOT NULL DEFAULT 0 COMMENT '量化候选数量',
+                pick_count INT NOT NULL DEFAULT 0 COMMENT 'LLM复核后候选数量',
+                buy_count INT NOT NULL DEFAULT 0 COMMENT '模拟买入数量',
+                sell_count INT NOT NULL DEFAULT 0 COMMENT '模拟卖出数量',
+                execute_trades TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否执行模拟交易',
+                llm_required TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否要求LLM复核成功',
+                llm_success TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'LLM复核是否成功',
+                market_session VARCHAR(32) NULL COMMENT '市场时段',
+                skip_reason VARCHAR(512) NULL COMMENT '跳过原因',
+                error_message TEXT NULL COMMENT '错误信息',
+                summary_json JSON NULL COMMENT '运行摘要',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                PRIMARY KEY (id),
+                KEY idx_t1_quality_run_trade_time (trade_date, snapshot_time),
+                KEY idx_t1_quality_run_status (status, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='T+1盘中质量选股运行记录';
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stock_t1_intraday_pick (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                run_id BIGINT UNSIGNED NOT NULL COMMENT '关联运行编号',
+                trade_date DATE NOT NULL COMMENT '交易日期',
+                snapshot_time DATETIME NOT NULL COMMENT '行情快照时间',
+                rank_no INT NOT NULL COMMENT '排名',
+                symbol VARCHAR(16) NOT NULL COMMENT '股票代码',
+                name VARCHAR(64) NOT NULL COMMENT '股票名称',
+                latest_price DECIMAL(18,4) NOT NULL COMMENT '实时最新价',
+                pct_change DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '实时涨跌幅',
+                volume_ratio DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量比',
+                turnover_rate DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '换手率',
+                trend_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '趋势分',
+                momentum_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '动量分',
+                liquidity_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '流动性分',
+                risk_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '风险控制分',
+                quant_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量化质量分',
+                llm_score DECIMAL(10,4) NULL COMMENT 'LLM复核分',
+                final_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '最终质量分',
+                signal_action VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '候选动作',
+                expected_direction VARCHAR(64) NOT NULL DEFAULT 'T日买入，T+1可卖' COMMENT '预期方向',
+                reason TEXT NULL COMMENT '入选理由',
+                risk TEXT NULL COMMENT '风险提示',
+                factor_snapshot JSON NULL COMMENT '因子快照',
+                raw_response JSON NULL COMMENT 'LLM原始响应',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_t1_quality_pick_run_symbol (run_id, symbol),
+                KEY idx_t1_quality_pick_trade_rank (trade_date, rank_no),
+                KEY idx_t1_quality_pick_trade_symbol (trade_date, symbol)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='T+1盘中质量选股候选';
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stock_call_auction_run (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '运行编号',
+                trade_date DATE NOT NULL COMMENT '交易日期',
+                snapshot_time DATETIME NOT NULL COMMENT '行情快照时间',
+                trigger_type VARCHAR(32) NOT NULL COMMENT '触发来源: manual/loop/api',
+                status VARCHAR(16) NOT NULL COMMENT '运行状态: SUCCESS/SKIPPED/FAILED',
+                quote_count INT NOT NULL DEFAULT 0 COMMENT '原始行情数量',
+                valid_quote_count INT NOT NULL DEFAULT 0 COMMENT '有效行情数量',
+                candidate_count INT NOT NULL DEFAULT 0 COMMENT '规则预筛候选数量',
+                pick_count INT NOT NULL DEFAULT 0 COMMENT 'LLM通过候选数量',
+                llm_required TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否要求LLM复核成功',
+                llm_success TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'LLM复核是否成功',
+                market_session VARCHAR(32) NULL COMMENT '市场时段',
+                skip_reason VARCHAR(512) NULL COMMENT '跳过原因',
+                error_message TEXT NULL COMMENT '错误信息',
+                summary_json JSON NULL COMMENT '运行摘要',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                PRIMARY KEY (id),
+                KEY idx_call_auction_run_trade_time (trade_date, snapshot_time),
+                KEY idx_call_auction_run_status (status, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='集合竞价LLM快速选股运行记录';
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stock_call_auction_pick (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                run_id BIGINT UNSIGNED NOT NULL COMMENT '关联运行编号',
+                trade_date DATE NOT NULL COMMENT '交易日期',
+                snapshot_time DATETIME NOT NULL COMMENT '行情快照时间',
+                rank_no INT NOT NULL COMMENT '排名',
+                symbol VARCHAR(16) NOT NULL COMMENT '股票代码',
+                name VARCHAR(64) NOT NULL COMMENT '股票名称',
+                latest_price DECIMAL(18,4) NOT NULL COMMENT '集合竞价参考价或最新价',
+                pct_change DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '竞价涨跌幅',
+                volume DECIMAL(24,4) NULL COMMENT '竞价阶段累计成交量',
+                amount DECIMAL(24,4) NULL COMMENT '竞价阶段成交额',
+                volume_ratio DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量比',
+                turnover_rate DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '换手率',
+                price_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '价格强度分',
+                volume_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量能流动性分',
+                trend_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '历史趋势分',
+                risk_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '风险控制分',
+                quant_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量化预筛分',
+                llm_score DECIMAL(10,4) NULL COMMENT 'LLM复核分',
+                final_score DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '最终综合分',
+                signal_action VARCHAR(24) NOT NULL DEFAULT 'WATCH' COMMENT '候选动作',
+                reason TEXT NULL COMMENT '入选理由',
+                risk TEXT NULL COMMENT '风险提示',
+                factor_snapshot JSON NULL COMMENT '因子快照',
+                raw_response JSON NULL COMMENT 'LLM原始响应',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_call_auction_pick_run_symbol (run_id, symbol),
+                KEY idx_call_auction_pick_trade_rank (trade_date, rank_no),
+                KEY idx_call_auction_pick_trade_symbol (trade_date, symbol)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='集合竞价LLM快速选股候选';
             """,
             """
             CREATE TABLE IF NOT EXISTS stock_three_day_pick (
@@ -793,10 +1231,153 @@ class MySQLRepository:
         ]
 
 
-def _quote_identifier(identifier: str) -> str:
-    """安全引用 MySQL 标识符，只允许字母、数字和下划线。"""
+def _call_auction_run_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """将集合竞价运行记录转换为前端字段。"""
 
-    if not identifier.replace("_", "").isalnum():
+    return {
+        "id": int(row.get("id") or 0),
+        "tradeDate": _date_text(row.get("trade_date")),
+        "snapshotTime": _datetime_text(row.get("snapshot_time")),
+        "triggerType": row.get("trigger_type"),
+        "status": row.get("status"),
+        "quoteCount": int(row.get("quote_count") or 0),
+        "validQuoteCount": int(row.get("valid_quote_count") or 0),
+        "candidateCount": int(row.get("candidate_count") or 0),
+        "pickCount": int(row.get("pick_count") or 0),
+        "llmRequired": bool(row.get("llm_required")),
+        "llmSuccess": bool(row.get("llm_success")),
+        "marketSession": row.get("market_session"),
+        "skipReason": row.get("skip_reason") or "",
+        "errorMessage": row.get("error_message") or "",
+        "summary": _json_object(row.get("summary_json")),
+        "createdAt": _datetime_text(row.get("created_at")),
+    }
+
+
+def _call_auction_pick_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """将集合竞价候选转换为前端字段。"""
+
+    return {
+        "id": int(row.get("id") or 0),
+        "runId": int(row.get("run_id") or 0),
+        "rank": int(row.get("rank_no") or 0),
+        "tradeDate": _date_text(row.get("trade_date")),
+        "snapshotTime": _datetime_text(row.get("snapshot_time")),
+        "symbol": row.get("symbol"),
+        "name": row.get("name"),
+        "latestPrice": _float_or_none(row.get("latest_price")) or 0,
+        "pctChange": _float_or_none(row.get("pct_change")) or 0,
+        "volume": _float_or_none(row.get("volume")) or 0,
+        "amount": _float_or_none(row.get("amount")) or 0,
+        "volumeRatio": _float_or_none(row.get("volume_ratio")) or 0,
+        "turnoverRate": _float_or_none(row.get("turnover_rate")) or 0,
+        "priceScore": _float_or_none(row.get("price_score")) or 0,
+        "volumeScore": _float_or_none(row.get("volume_score")) or 0,
+        "trendScore": _float_or_none(row.get("trend_score")) or 0,
+        "riskScore": _float_or_none(row.get("risk_score")) or 0,
+        "quantScore": _float_or_none(row.get("quant_score")) or 0,
+        "llmScore": _float_or_none(row.get("llm_score")),
+        "finalScore": _float_or_none(row.get("final_score")) or 0,
+        "action": row.get("signal_action"),
+        "reason": row.get("reason") or "",
+        "risk": row.get("risk") or "",
+    }
+
+
+def _quality_run_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """将 T+1 质量选股运行记录转换为前端字段。"""
+
+    return {
+        "id": int(row.get("id") or 0),
+        "tradeDate": _date_text(row.get("trade_date")),
+        "snapshotTime": _datetime_text(row.get("snapshot_time")),
+        "triggerType": row.get("trigger_type"),
+        "status": row.get("status"),
+        "quoteCount": int(row.get("quote_count") or 0),
+        "validQuoteCount": int(row.get("valid_quote_count") or 0),
+        "candidateCount": int(row.get("candidate_count") or 0),
+        "pickCount": int(row.get("pick_count") or 0),
+        "buyCount": int(row.get("buy_count") or 0),
+        "sellCount": int(row.get("sell_count") or 0),
+        "executeTrades": bool(row.get("execute_trades")),
+        "llmRequired": bool(row.get("llm_required")),
+        "llmSuccess": bool(row.get("llm_success")),
+        "marketSession": row.get("market_session"),
+        "skipReason": row.get("skip_reason") or "",
+        "errorMessage": row.get("error_message") or "",
+        "createdAt": _datetime_text(row.get("created_at")),
+    }
+
+
+def _quality_pick_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """将 T+1 质量选股候选转换为前端字段。"""
+
+    return {
+        "id": int(row.get("id") or 0),
+        "runId": int(row.get("run_id") or 0),
+        "rank": int(row.get("rank_no") or 0),
+        "tradeDate": _date_text(row.get("trade_date")),
+        "snapshotTime": _datetime_text(row.get("snapshot_time")),
+        "symbol": row.get("symbol"),
+        "name": row.get("name"),
+        "latestPrice": _float_or_none(row.get("latest_price")) or 0,
+        "pctChange": _float_or_none(row.get("pct_change")) or 0,
+        "volumeRatio": _float_or_none(row.get("volume_ratio")) or 0,
+        "turnoverRate": _float_or_none(row.get("turnover_rate")) or 0,
+        "trendScore": _float_or_none(row.get("trend_score")) or 0,
+        "momentumScore": _float_or_none(row.get("momentum_score")) or 0,
+        "liquidityScore": _float_or_none(row.get("liquidity_score")) or 0,
+        "riskScore": _float_or_none(row.get("risk_score")) or 0,
+        "quantScore": _float_or_none(row.get("quant_score")) or 0,
+        "llmScore": _float_or_none(row.get("llm_score")),
+        "finalScore": _float_or_none(row.get("final_score")) or 0,
+        "action": row.get("signal_action"),
+        "expectedDirection": row.get("expected_direction"),
+        "reason": row.get("reason") or "",
+        "risk": row.get("risk") or "",
+    }
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    """把 JSON 字段转换为字典，异常时返回空字典。"""
+
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _date_text(value: Any) -> str | None:
+    """把日期值转换为 ISO 字符串。"""
+
+    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value else None)
+
+
+def _datetime_text(value: Any) -> str | None:
+    """把日期时间值转换为前端可读字符串。"""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat(sep=" ", timespec="seconds") if hasattr(value, "isoformat") else str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    """把数字值转换为 float，空值保持 None。"""
+
+    return None if value is None else float(value)
+
+
+def _quote_identifier(identifier: str) -> str:
+    """校验并引用 MySQL 标识符，避免数据库名拼接时出现注入风险。"""
+
+    if not identifier or not identifier.replace("_", "").isalnum():
         raise ValueError(f"MySQL 标识符不安全: {identifier}")
     return f"`{identifier}`"
 
