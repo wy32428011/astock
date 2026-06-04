@@ -314,7 +314,7 @@ class CallAuctionSelector:
         trigger_type: str = "manual",
         now: datetime | None = None,
     ) -> CallAuctionRunResult:
-        """执行一次集合竞价快照选股。"""
+        """执行一次集合竞价分阶段采集或选股。"""
 
         self.repository.ensure_schema()
         snapshot_time = now or datetime.now(
@@ -342,6 +342,11 @@ class CallAuctionSelector:
                 "call_auction_start_time",
                 DEFAULT_CALL_AUCTION_START_TIME,
             ),
+            getattr(
+                self.settings,
+                "call_auction_decision_start_time",
+                DEFAULT_CALL_AUCTION_DECISION_START_TIME,
+            ),
             getattr(self.settings, "call_auction_end_time", DEFAULT_CALL_AUCTION_END_TIME),
         )
         if not force and not status["marketOpen"]:
@@ -356,22 +361,83 @@ class CallAuctionSelector:
                 summary={"marketStatus": _json_safe_status(status)},
             )
 
+        forced_decision = bool(force)
+        active_session = (
+            "call_auction"
+            if forced_decision or bool(status.get("decisionOpen"))
+            else str(status["session"])
+        )
         try:
             quotes = self.market_data.fetch_realtime_quotes()
         except Exception as exc:
+            fused_quotes = (
+                self.repository.latest_call_auction_quotes(trade_date)
+                if forced_decision or bool(status.get("decisionOpen"))
+                else []
+            )
+            if fused_quotes:
+                quotes = []
+            else:
+                market_session = (
+                    "call_auction" if forced_decision else str(status["session"])
+                )
+                return self._record_result(
+                    trade_date=trade_date,
+                    snapshot_time=snapshot_time,
+                    trigger_type=trigger_type,
+                    status="SKIPPED",
+                    llm_required=llm_required,
+                    market_session=market_session,
+                    skip_reason=f"实时行情获取失败，已跳过集合竞价选股: {exc}",
+                    error_message=str(exc),
+                    summary={
+                        "marketStatus": _json_safe_status(status),
+                        "forced": forced_decision,
+                    },
+                )
+        else:
+            fused_quotes = []
+        valid_quotes = [item for item in quotes if _resolve_auction_price(item) > 0]
+        quote_rows = [
+            row
+            for row in (
+                build_call_auction_quote_row(
+                    trade_date=trade_date,
+                    snapshot_time=snapshot_time,
+                    quote=item,
+                )
+                for item in valid_quotes
+            )
+            if row is not None
+        ]
+        upserted_quotes = self.repository.upsert_call_auction_quotes(quote_rows)
+        quote_summary = self.repository.call_auction_quote_summary(trade_date)
+        if not fused_quotes and (forced_decision or bool(status.get("decisionOpen"))):
+            fused_quotes = self.repository.latest_call_auction_quotes(trade_date)
+        base_summary = {
+            "marketStatus": _json_safe_status(status),
+            "forced": forced_decision,
+            "quoteSnapshotCount": int((quote_summary or {}).get("quoteCount") or 0),
+            "upsertedQuoteCount": upserted_quotes,
+            "quoteSummary": quote_summary,
+        }
+        if not forced_decision and str(status["session"]) == "pre_call_auction":
             return self._record_result(
                 trade_date=trade_date,
                 snapshot_time=snapshot_time,
                 trigger_type=trigger_type,
-                status="SKIPPED",
+                status="COLLECTING",
+                quote_count=len(quotes),
+                valid_quote_count=len(valid_quotes),
+                candidate_count=0,
+                pick_count=0,
                 llm_required=llm_required,
-                market_session="call_auction",
-                skip_reason=f"实时行情获取失败，已跳过集合竞价选股: {exc}",
-                error_message=str(exc),
-                summary={"marketStatus": _json_safe_status(status)},
+                llm_success=False,
+                market_session="pre_call_auction",
+                summary=base_summary,
             )
-        valid_quotes = [item for item in quotes if _resolve_auction_price(item) > 0]
-        if not valid_quotes:
+        decision_quotes = fused_quotes or valid_quotes
+        if not decision_quotes:
             return self._record_result(
                 trade_date=trade_date,
                 snapshot_time=snapshot_time,
@@ -380,14 +446,14 @@ class CallAuctionSelector:
                 quote_count=len(quotes),
                 valid_quote_count=0,
                 llm_required=llm_required,
-                market_session="call_auction",
-                skip_reason="实时行情没有有效价格，已跳过集合竞价选股",
-                summary={"marketStatus": _json_safe_status(status)},
+                market_session=active_session,
+                skip_reason="集合竞价融合快照没有有效价格，已跳过选股",
+                summary=base_summary,
             )
 
         strategy_mode = "standard"
         candidates = self._build_candidates(
-            valid_quotes,
+            decision_quotes,
             trade_date=trade_date,
             snapshot_time=snapshot_time,
             strategy_mode=strategy_mode,
@@ -395,7 +461,7 @@ class CallAuctionSelector:
         if not candidates:
             strategy_mode = "relaxed"
             candidates = self._build_candidates(
-                valid_quotes,
+                decision_quotes,
                 trade_date=trade_date,
                 snapshot_time=snapshot_time,
                 strategy_mode=strategy_mode,
@@ -407,38 +473,32 @@ class CallAuctionSelector:
                 trigger_type=trigger_type,
                 status="SKIPPED",
                 quote_count=len(quotes),
-                valid_quote_count=len(valid_quotes),
+                valid_quote_count=len(decision_quotes),
                 candidate_count=0,
                 llm_required=llm_required,
-                market_session="call_auction",
+                market_session=active_session,
                 skip_reason="规则预筛没有符合条件的集合竞价候选",
                 summary={
-                    "marketStatus": _json_safe_status(status),
+                    **base_summary,
                     "strategyMode": strategy_mode,
                 },
             )
 
         review_limit = max(1, int(getattr(self.settings, "call_auction_llm_review_limit", 20)))
         reviewed, llm_status = self._review_with_llm(candidates[:review_limit])
-        if llm_required and not llm_status.get("llmSuccess"):
-            return self._record_result(
-                trade_date=trade_date,
-                snapshot_time=snapshot_time,
-                trigger_type=trigger_type,
-                status="SKIPPED",
-                quote_count=len(quotes),
-                valid_quote_count=len(valid_quotes),
-                candidate_count=len(candidates),
-                llm_required=llm_required,
-                llm_success=False,
-                market_session="call_auction",
-                skip_reason=str(llm_status.get("skipReason") or "LLM 复核失败"),
-                summary={
-                    "marketStatus": _json_safe_status(status),
-                    "llm": llm_status,
-                    "strategyMode": strategy_mode,
-                },
+        llm_fallback = not bool(llm_status.get("llmSuccess"))
+        if llm_fallback:
+            reviewed = _build_rule_fallback_candidates(
+                candidates[:review_limit],
+                limit=limit,
+                llm_status=llm_status,
             )
+            llm_status = {
+                **llm_status,
+                "llmFallback": True,
+                "fallbackReason": "LLM 复核失败，已按量化规则降级输出候选",
+                "buyCount": len(reviewed),
+            }
 
         picks = [
             item
@@ -452,15 +512,16 @@ class CallAuctionSelector:
                 trigger_type=trigger_type,
                 status="SUCCESS",
                 quote_count=len(quotes),
-                valid_quote_count=len(valid_quotes),
+                valid_quote_count=len(decision_quotes),
                 candidate_count=len(candidates),
                 pick_count=len(picks),
                 llm_required=llm_required,
                 llm_success=bool(llm_status.get("llmSuccess")),
-                market_session="call_auction",
+                market_session=active_session,
                 summary={
-                    "marketStatus": _json_safe_status(status),
+                    **base_summary,
                     "llm": llm_status,
+                    "llmFallback": llm_fallback,
                     "strategyMode": strategy_mode,
                 },
             )
@@ -483,15 +544,16 @@ class CallAuctionSelector:
             trigger_type=trigger_type,
             status="SUCCESS",
             quote_count=len(quotes),
-            valid_quote_count=len(valid_quotes),
+            valid_quote_count=len(decision_quotes),
             candidate_count=len(candidates),
             pick_count=len(picks),
             llm_required=llm_required,
             llm_success=bool(llm_status.get("llmSuccess")),
-            market_session="call_auction",
+            market_session=active_session,
             summary={
-                "marketStatus": _json_safe_status(status),
+                **base_summary,
                 "llm": llm_status,
+                "llmFallback": llm_fallback,
                 "strategyMode": strategy_mode,
             },
         )
@@ -508,6 +570,11 @@ class CallAuctionSelector:
                     self.settings,
                     "call_auction_start_time",
                     DEFAULT_CALL_AUCTION_START_TIME,
+                ),
+                getattr(
+                    self.settings,
+                    "call_auction_decision_start_time",
+                    DEFAULT_CALL_AUCTION_DECISION_START_TIME,
                 ),
                 getattr(
                     self.settings,
@@ -595,6 +662,11 @@ class CallAuctionSelector:
                             "call_auction_start_time",
                             DEFAULT_CALL_AUCTION_START_TIME,
                         ),
+                        "decisionStart": getattr(
+                            self.settings,
+                            "call_auction_decision_start_time",
+                            DEFAULT_CALL_AUCTION_DECISION_START_TIME,
+                        ),
                         "end": getattr(
                             self.settings,
                             "call_auction_end_time",
@@ -614,6 +686,8 @@ class CallAuctionSelector:
                     "liquidityMissing": liquidity_missing,
                     "liquidityWeak": liquidity_weak,
                     "overheat": overheat,
+                    "fusedSnapshot": bool(quote.get("latest_sample_time")),
+                    "sampleCount": int(quote.get("sample_count") or 1),
                 }
             )
             candidates.append(
@@ -753,11 +827,42 @@ class CallAuctionSelector:
             llm_required=llm_required,
             llm_success=llm_success,
             market_session=market_session,
-            skipped=status != "SUCCESS",
+            skipped=status == "SKIPPED",
             skip_reason=skip_reason,
             error_message=error_message,
             summary=summary,
         )
+
+
+def _build_rule_fallback_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    limit: int,
+    llm_status: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """LLM 失败时按量化分降级生成集合竞价候选。"""
+
+    fallback: list[dict[str, Any]] = []
+    skip_reason = str(llm_status.get("skipReason") or "LLM 复核失败")
+    for candidate in list(candidates)[:limit]:
+        item = dict(candidate)
+        item["action"] = CALL_AUCTION_ACTION_BUY
+        item["llmScore"] = None
+        item["finalScore"] = round(float(item.get("quantScore") or 0), 4)
+        item["reason"] = "LLM失败，按量化规则降级入选"
+        item["risk"] = "规则降级，未经过 LLM 复核"
+        item["rawResponse"] = {
+            "llmFallback": True,
+            "skipReason": skip_reason,
+            "previousAction": candidate.get("action"),
+        }
+        factor_snapshot = dict(item.get("factorSnapshot") or {})
+        factor_snapshot["llmFallback"] = True
+        factor_snapshot["llmFallbackReason"] = skip_reason
+        item["factorSnapshot"] = factor_snapshot
+        fallback.append(item)
+    fallback.sort(key=lambda row: float(row.get("finalScore") or 0), reverse=True)
+    return fallback
 
 
 def _build_llm_messages(candidates: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:

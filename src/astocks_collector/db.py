@@ -283,6 +283,7 @@ class MySQLRepository:
                     "stock_basic",
                     "stock_daily",
                     "stock_analysis_pick",
+                    "stock_call_auction_quote",
                     "stock_call_auction_run",
                     "stock_call_auction_pick",
                     "stock_three_day_pick",
@@ -650,6 +651,92 @@ class MySQLRepository:
             conn.commit()
         return run_id
 
+    def upsert_call_auction_quotes(self, rows: Sequence[Mapping[str, Any]]) -> int:
+        """批量写入集合竞价融合快照，按交易日和股票保留最佳字段。"""
+
+        if not rows:
+            return 0
+        sql = """
+            INSERT INTO stock_call_auction_quote (
+                trade_date, symbol, name, exchange, latest_price, pct_change,
+                volume, amount, volume_ratio, turnover_rate, amplitude, source,
+                first_sample_time, latest_sample_time, sample_count,
+                quality_flags, raw_snapshot
+            )
+            VALUES (
+                %(trade_date)s, %(symbol)s, %(name)s, %(exchange)s,
+                %(latest_price)s, %(pct_change)s, %(volume)s, %(amount)s,
+                %(volume_ratio)s, %(turnover_rate)s, %(amplitude)s, %(source)s,
+                %(first_sample_time)s, %(latest_sample_time)s, 1,
+                %(quality_flags)s, %(raw_snapshot)s
+            )
+            ON DUPLICATE KEY UPDATE
+                name=IF(VALUES(name) <> '', VALUES(name), name),
+                exchange=IF(VALUES(exchange) <> '', VALUES(exchange), exchange),
+                latest_price=IF(VALUES(latest_price) > 0, VALUES(latest_price), latest_price),
+                pct_change=IF(VALUES(latest_price) > 0, VALUES(pct_change), pct_change),
+                volume=IF(VALUES(volume) > 0, VALUES(volume), volume),
+                amount=IF(VALUES(amount) > 0, VALUES(amount), amount),
+                volume_ratio=IF(VALUES(volume_ratio) > 0, VALUES(volume_ratio), volume_ratio),
+                turnover_rate=IF(VALUES(turnover_rate) > 0, VALUES(turnover_rate), turnover_rate),
+                amplitude=IF(VALUES(amplitude) > 0, VALUES(amplitude), amplitude),
+                source=IF(VALUES(source) <> '', VALUES(source), source),
+                latest_sample_time=GREATEST(latest_sample_time, VALUES(latest_sample_time)),
+                sample_count=sample_count + 1,
+                quality_flags=VALUES(quality_flags),
+                raw_snapshot=VALUES(raw_snapshot),
+                updated_at=CURRENT_TIMESTAMP
+        """
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                affected = cursor.executemany(sql, [dict(item) for item in rows])
+            conn.commit()
+        return int(affected)
+
+    def latest_call_auction_quotes(self, trade_date: Any) -> list[dict[str, Any]]:
+        """读取指定交易日的集合竞价融合快照。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM stock_call_auction_quote
+                    WHERE trade_date = %s
+                    ORDER BY latest_sample_time DESC, symbol ASC
+                    """,
+                    (trade_date,),
+                )
+                rows = cursor.fetchall() or []
+        return [_call_auction_quote_to_dict(row) for row in rows]
+
+    def call_auction_quote_summary(self, trade_date: Any) -> dict[str, Any]:
+        """统计指定交易日集合竞价融合快照的覆盖情况。"""
+
+        with self.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS quote_count,
+                        SUM(CASE WHEN latest_price > 0 THEN 1 ELSE 0 END) AS valid_price_count,
+                        MIN(first_sample_time) AS first_sample_time,
+                        MAX(latest_sample_time) AS latest_sample_time,
+                        SUM(sample_count) AS total_sample_count
+                    FROM stock_call_auction_quote
+                    WHERE trade_date = %s
+                    """,
+                    (trade_date,),
+                )
+                row = cursor.fetchone() or {}
+        return {
+            "quoteCount": int(row.get("quote_count") or 0),
+            "validPriceCount": int(row.get("valid_price_count") or 0),
+            "firstSampleTime": _datetime_text(row.get("first_sample_time")),
+            "latestSampleTime": _datetime_text(row.get("latest_sample_time")),
+            "totalSampleCount": int(row.get("total_sample_count") or 0),
+        }
+
     def replace_call_auction_picks(
         self, run_id: int, picks: Sequence[Mapping[str, Any]]
     ) -> int:
@@ -726,7 +813,11 @@ class MySQLRepository:
                     """
                     SELECT *
                     FROM stock_call_auction_pick
-                    WHERE run_id = (SELECT MAX(id) FROM stock_call_auction_run)
+                    WHERE run_id = (
+                        SELECT MAX(id)
+                        FROM stock_call_auction_run
+                        WHERE status = 'SUCCESS'
+                    )
                     ORDER BY rank_no ASC
                     LIMIT %s
                     """,
@@ -970,6 +1061,35 @@ class MySQLRepository:
                 KEY idx_t1_quality_pick_trade_rank (trade_date, rank_no),
                 KEY idx_t1_quality_pick_trade_symbol (trade_date, symbol)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='T+1盘中质量选股候选';
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS stock_call_auction_quote (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                trade_date DATE NOT NULL COMMENT '交易日期',
+                symbol VARCHAR(16) NOT NULL COMMENT '股票代码',
+                name VARCHAR(64) NOT NULL COMMENT '股票名称',
+                exchange VARCHAR(8) NULL COMMENT '交易所',
+                latest_price DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '最新有效竞价参考价',
+                pct_change DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '竞价涨跌幅',
+                volume DECIMAL(24,4) NOT NULL DEFAULT 0 COMMENT '累计成交量',
+                amount DECIMAL(24,4) NOT NULL DEFAULT 0 COMMENT '累计成交额',
+                volume_ratio DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '量比',
+                turnover_rate DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '换手率',
+                amplitude DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '振幅',
+                source VARCHAR(64) NULL COMMENT '最近有效行情来源',
+                first_sample_time DATETIME NOT NULL COMMENT '首次采样时间',
+                latest_sample_time DATETIME NOT NULL COMMENT '最近采样时间',
+                sample_count INT NOT NULL DEFAULT 1 COMMENT '融合采样次数',
+                quality_flags JSON NULL COMMENT '字段质量标记',
+                raw_snapshot JSON NULL COMMENT '最近原始行情快照',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                PRIMARY KEY (id),
+                UNIQUE KEY uk_call_auction_quote_trade_symbol (trade_date, symbol),
+                KEY idx_call_auction_quote_latest (trade_date, latest_sample_time),
+                KEY idx_call_auction_quote_amount (trade_date, amount)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='集合竞价融合行情快照';
             """,
             """
             CREATE TABLE IF NOT EXISTS stock_call_auction_run (
@@ -1251,6 +1371,29 @@ def _call_auction_run_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
         "errorMessage": row.get("error_message") or "",
         "summary": _json_object(row.get("summary_json")),
         "createdAt": _datetime_text(row.get("created_at")),
+    }
+
+
+def _call_auction_quote_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """将集合竞价融合快照转换为候选构建可用字段。"""
+
+    return {
+        "symbol": row.get("symbol"),
+        "name": row.get("name"),
+        "exchange": row.get("exchange"),
+        "latest_price": _float_or_none(row.get("latest_price")) or 0,
+        "pct_change": _float_or_none(row.get("pct_change")) or 0,
+        "volume": _float_or_none(row.get("volume")) or 0,
+        "amount": _float_or_none(row.get("amount")) or 0,
+        "volume_ratio": _float_or_none(row.get("volume_ratio")) or 0,
+        "turnover_rate": _float_or_none(row.get("turnover_rate")) or 0,
+        "amplitude": _float_or_none(row.get("amplitude")) or 0,
+        "source": row.get("source"),
+        "first_sample_time": row.get("first_sample_time"),
+        "latest_sample_time": row.get("latest_sample_time"),
+        "sample_count": int(row.get("sample_count") or 0),
+        "quality_flags": _json_object(row.get("quality_flags")),
+        "raw_snapshot": _json_object(row.get("raw_snapshot")),
     }
 
 

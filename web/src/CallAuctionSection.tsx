@@ -26,7 +26,12 @@ export function CallAuctionSection() {
 
   const intervalSeconds = dashboard?.autoIntervalSeconds || 10;
   const marketOpen = dashboard?.marketStatus?.marketOpen === true;
+  const collectOpen = dashboard?.marketStatus?.collectOpen === true;
+  const decisionOpen = dashboard?.marketStatus?.decisionOpen === true;
+  const auctionActive = marketOpen || collectOpen || decisionOpen;
   const latestRun = dashboard?.latestRun || null;
+  const quoteSummary = dashboard?.quoteSummary || null;
+  const llmFallback = hasLlmFallback(latestRun?.summary);
 
   const loadDashboard = useCallback(async (silent = false) => {
     if (requestInFlightRef.current) {
@@ -58,6 +63,8 @@ export function CallAuctionSection() {
       const result = await runCallAuction(5, false);
       if (result.skipped) {
         setAutoError(result.skipReason || '本轮集合竞价选股已跳过');
+      } else if (result.status === 'COLLECTING') {
+        setAutoError(null);
       } else {
         setAutoError(null);
       }
@@ -78,14 +85,14 @@ export function CallAuctionSection() {
   useEffect(() => {
     if (!autoRefresh) return undefined;
     const timer = window.setInterval(() => {
-      if (marketOpen) {
+      if (auctionActive) {
         void runOnce(true);
       } else {
         void loadDashboard(true);
       }
     }, Math.max(1, intervalSeconds) * 1000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, intervalSeconds, loadDashboard, marketOpen, runOnce]);
+  }, [auctionActive, autoRefresh, intervalSeconds, loadDashboard, runOnce]);
 
   const columns = useMemo<ColumnsType<CallAuctionPick>>(
     () => [
@@ -140,10 +147,10 @@ export function CallAuctionSection() {
               type="primary"
               icon={<ThunderboltOutlined />}
               loading={loading}
-              disabled={!marketOpen}
+              disabled={!auctionActive}
               onClick={() => void runOnce()}
             >
-              运行复核
+              {decisionOpen ? '运行复核' : '采集快照'}
             </Button>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadDashboard()}>
               刷新
@@ -160,16 +167,17 @@ export function CallAuctionSection() {
                 </span>
               }
             />
-            <Tag color={marketOpen ? 'green' : 'default'}>
-              {marketOpen ? '竞价窗口' : '非竞价窗口'}
+            <Tag color={decisionOpen ? 'red' : collectOpen ? 'green' : 'default'}>
+              {decisionOpen ? '决策中' : collectOpen ? '采集中' : '非竞价窗口'}
             </Tag>
-            <Tag color={latestRun?.llmSuccess ? 'blue' : 'default'}>
-              <RobotOutlined /> LLM {latestRun?.llmSuccess ? '已通过' : '未通过'}
+            <Tag color={llmFallback ? 'orange' : latestRun?.llmSuccess ? 'blue' : 'default'}>
+              <RobotOutlined /> LLM {llmFallback ? '规则降级' : latestRun?.llmSuccess ? '已通过' : '未通过'}
             </Tag>
           </Space>
           <Space wrap>
             <Typography.Text className="muted">
-              窗口 {dashboard?.marketStatus?.window || '09:20-09:25'}，状态{' '}
+              采集 {dashboard?.marketStatus?.collectWindow || '09:15-09:20'}，决策{' '}
+              {dashboard?.marketStatus?.decisionWindow || '09:20-09:25'}，状态{' '}
               {dashboard?.marketStatus?.reason || '-'}
             </Typography.Text>
             <Typography.Text className="muted">
@@ -177,14 +185,21 @@ export function CallAuctionSection() {
             </Typography.Text>
             <Typography.Text className="muted">
               行情 {latestRun?.quoteCount || 0}，规则候选 {latestRun?.candidateCount || 0}，
-              LLM候选 {latestRun?.pickCount || 0}，跳过 {skippedCount} 次
+              LLM候选 {latestRun?.pickCount || 0}，融合 {quoteSummary?.quoteCount || 0}，
+              跳过 {skippedCount} 次
             </Typography.Text>
           </Space>
-          {!marketOpen && (
+          {!auctionActive && (
             <Alert showIcon type="info" message={dashboard?.marketStatus?.reason || '非集合竞价窗口'} />
+          )}
+          {latestRun?.status === 'COLLECTING' && (
+            <Alert showIcon type="info" message="集合竞价采集期正在融合行情快照，09:20 后进入候选复核。" />
           )}
           {latestRun?.status === 'SKIPPED' && latestRun.skipReason && (
             <Alert showIcon type="warning" message={latestRun.skipReason} />
+          )}
+          {llmFallback && (
+            <Alert showIcon type="warning" message="LLM 复核失败，本轮候选按量化规则降级输出。" />
           )}
           {autoError && <Alert showIcon type="warning" message={autoError} />}
         </Space>
@@ -198,7 +213,7 @@ export function CallAuctionSection() {
           <MetricCard title="LLM通过" value={latestRun?.pickCount || 0} />
         </Col>
         <Col xs={24} md={8}>
-          <MetricCard title="有效行情" value={latestRun?.validQuoteCount || 0} />
+          <MetricCard title="融合快照" value={quoteSummary?.quoteCount || 0} />
         </Col>
       </Row>
 
@@ -224,6 +239,16 @@ function MetricCard({ title, value }: { title: string; value: number }) {
       <div className="call-auction-metric">{value}</div>
     </Card>
   );
+}
+
+// 从运行摘要中读取 LLM 降级标记，兼容后端新旧摘要结构。
+function hasLlmFallback(summary?: Record<string, unknown>) {
+  if (!summary) return false;
+  if (summary.llmFallback === true) return true;
+  const llm = summary.llm;
+  return typeof llm === 'object' && llm !== null && 'llmFallback' in llm
+    ? (llm as { llmFallback?: boolean }).llmFallback === true
+    : false;
 }
 
 // 价格格式化，空值显示横线。

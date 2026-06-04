@@ -15,7 +15,7 @@
 - 提供实时行情分析和模拟交易账户，支持实时信号、模拟持仓、订单和成交记录。
 - 实时交易页面支持自动刷新、自动模拟买卖，并可使用规则预筛 + LLM 复核生成最终决策；LLM 不可用时自动降级为规则引擎。
 - 提供全 A 股未来 3 个交易日涨势分析，使用量化预筛 + LLM 复核输出短线候选，LLM 不可用时降级为量化排序。
-- 提供 9:20-9:25 集合竞价 LLM 快速选股，规则预筛后必须经 LLM 复核，只输出候选，不自动下单。
+- 提供 9:15-9:25 集合竞价分阶段采集与 LLM 快速选股，采集期融合行情快照，决策期输出候选，不自动下单。
 
 ## 数据源
 
@@ -78,7 +78,8 @@ REALTIME_DECISION_MODE=llm_review
 REALTIME_AUTO_INTERVAL_SECONDS=60
 REALTIME_LLM_CANDIDATE_LIMIT=12
 CALL_AUCTION_ENABLED=1
-CALL_AUCTION_START_TIME=09:20
+CALL_AUCTION_START_TIME=09:15
+CALL_AUCTION_DECISION_START_TIME=09:20
 CALL_AUCTION_END_TIME=09:25
 CALL_AUCTION_AUTO_INTERVAL_SECONDS=10
 CALL_AUCTION_PRESELECT_LIMIT=120
@@ -119,7 +120,8 @@ astocks-collector init-db
 - `stock_basic`：A股股票基础信息。
 - `stock_daily`：A股日线行情，唯一键为 `(symbol, trade_date, adjust_type)`。
 - `stock_analysis_pick`：T+1 大模型选股结果。
-- `stock_call_auction_run`：9:20-9:25 集合竞价 LLM 快速选股运行记录。
+- `stock_call_auction_quote`：9:15-9:25 集合竞价融合行情快照，按交易日和股票保留最佳字段。
+- `stock_call_auction_run`：集合竞价采集期和决策期运行记录。
 - `stock_call_auction_pick`：集合竞价 LLM 复核通过候选，保存评分、理由、风险和因子快照。
 - `stock_three_day_pick`：未来 3 个交易日涨势分析结果，保存量化因子快照、LLM 评分和降级状态。
 - `stock_realtime_quote`：实时行情最新快照。
@@ -318,7 +320,7 @@ astocks-collector sim-reset --initial-cash 1000000
 
 ## 集合竞价 LLM 快速选股
 
-集合竞价模块只在北京时间工作日 `09:20:00-09:25:00` 运行，读取全 A 股实时行情做规则预筛，再把 Top20 交给本地 OpenAI 兼容 LLM 复核。LLM 必须返回 `BUY_CANDIDATE` 或 `WATCH`；LLM 超时、不可用、返回格式异常或动作不合法时，本轮写入 `SKIPPED`，不输出买入候选。
+集合竞价模块按北京时间工作日 `09:15:00-09:25:00` 分阶段运行：`09:15:00-09:20:00` 为采集期，只读取全 A 股实时行情并写入 `stock_call_auction_quote` 融合快照，不输出候选；`09:20:00-09:25:00` 为决策期，先写入本轮快照，再基于当日融合快照做规则预筛，并把 Top20 交给本地 OpenAI 兼容 LLM 复核。LLM 必须返回 `BUY_CANDIDATE` 或 `WATCH`；LLM 超时、不可用、返回格式异常或动作不合法时，本轮按量化分降级输出候选，并在运行摘要中标记 `llmFallback=true`。
 
 执行一次集合竞价快选：
 
@@ -332,7 +334,7 @@ astocks-collector call-auction-once
 astocks-collector call-auction-loop --interval-seconds 10
 ```
 
-规则预筛默认剔除 ST、退市、N/C 新股、零价和异常行情，标准模式要求涨幅不低于 `0.0%`、综合分不低于 `55`，涨幅高于 `6.8%` 不再直接淘汰，而是按追高风险大幅扣分后交给 LLM；量比低于 `0.5` 或成交额低于 `300万` 也不直接淘汰，而是降低量能和风险评分后交给 LLM 判断，避免 9:20-9:25 早盘字段不完整或行情源仅返回涨幅榜时全市场无候选。若标准模式没有候选，会自动启用二次宽松预筛，把最低涨幅放宽到 `-0.3%`、综合分降到 `52`，高于 `7.5%` 的候选继续按追高风险扣分，但仍必须经过 LLM 复核后才会展示 `BUY_CANDIDATE`。结果写入 `stock_call_auction_run` 和 `stock_call_auction_pick`，只用于候选观察，不连接券商、不自动下单、不执行模拟买入。9:20-9:25 期间申报后不可撤单，页面和命令输出都只代表候选建议，不构成投资建议。
+规则预筛默认剔除 ST、退市、N/C 新股、零价和异常行情，标准模式要求涨幅不低于 `0.0%`、综合分不低于 `55`，涨幅高于 `6.8%` 不再直接淘汰，而是按追高风险大幅扣分后交给 LLM；量比低于 `0.5` 或成交额低于 `300万` 也不直接淘汰，而是降低量能和风险评分后交给 LLM 判断，避免单次行情字段不完整或行情源仅返回涨幅榜时全市场无候选。若标准模式没有候选，会自动启用二次宽松预筛，把最低涨幅放宽到 `-0.3%`、综合分降到 `52`，高于 `7.5%` 的候选继续按追高风险扣分。结果写入 `stock_call_auction_run` 和 `stock_call_auction_pick`，只用于候选观察，不连接券商、不自动下单、不执行模拟买入。LLM 不可用时会按量化 Top 候选降级输出，页面会显示“规则降级”；9:20-9:25 期间申报后不可撤单，页面和命令输出都只代表候选建议，不构成投资建议。
 
 ## 前端数据 API
 
@@ -442,7 +444,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File F:\astocks-collector\scr
 - `历史数据`：输入股票代码后展示近 N 日收盘价走势和成交量柱状图。
 - `分析数据`：展示 `stock_analysis_pick` 中最新 T+1 候选的排名、评分、理由和风险。
 - `3日分析`：展示 `stock_three_day_pick` 中最新未来 3 个交易日涨势候选，支持手动运行 3 日分析和刷新结果。
-- `集合竞价`：展示 9:20-9:25 集合竞价 LLM 快速选股窗口状态、LLM 复核状态、候选排名、评分、理由和风险，窗口内默认 10 秒自动刷新。
+- `集合竞价`：展示 9:15-9:20 采集期、9:20-9:25 决策期、融合快照数量、LLM 复核/规则降级状态、候选排名、评分、理由和风险，窗口内默认 10 秒自动刷新。
 - `实时交易`：展示实时分析信号、LLM 决策源、市场开盘状态、模拟账户资产、总盈亏、持仓浮盈、已实现盈亏、持仓和订单，并支持手动运行分析、自动刷新、自动模拟买卖和重置账户；运行分析和自动买卖只在开盘时段生效。
 - `T+1交易`：展示 T+1 专属账户、持仓、候选、订单和长期模型任务状态，支持启动/停止长期任务、实时执行一次、预演、执行模拟和重置账户。
 - `14:05质量选股`：14:05 T+1 盘中质量选股专属页，展示最新运行状态、行情统计、LLM 复核状态、手动运行/强制补跑按钮和质量候选明细。

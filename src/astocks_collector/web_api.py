@@ -415,10 +415,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         repository.ensure_schema()
         selector = CallAuctionSelector(app_config, repository)
+        market_status = selector.market_status()
+        trade_date = date.fromisoformat(str(market_status["now"])[:10])
         return {
             "latestRun": repository.latest_call_auction_run(),
             "picks": repository.latest_call_auction_picks(limit=finalLimit),
-            "marketStatus": selector.market_status(),
+            "marketStatus": market_status,
+            "quoteSummary": repository.call_auction_quote_summary(trade_date),
             "autoIntervalSeconds": app_config.call_auction_auto_interval_seconds,
         }
 

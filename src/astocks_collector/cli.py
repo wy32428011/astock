@@ -292,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval-seconds", type=int, default=60, help="循环间隔秒数"
     )
     call_auction_once = subparsers.add_parser(
-        "call-auction-once", help="执行一次 9:20-9:25 集合竞价 LLM 快速选股"
+        "call-auction-once", help="执行一次集合竞价分阶段采集或快速选股"
     )
     call_auction_once.add_argument(
         "--final-limit", type=int, default=None, help="最终输出候选数量"
@@ -382,6 +382,7 @@ def _export_config_to_env(config: AppConfig) -> None:
         "REALTIME_LLM_CANDIDATE_LIMIT": config.realtime_llm_candidate_limit,
         "CALL_AUCTION_ENABLED": config.call_auction_enabled,
         "CALL_AUCTION_START_TIME": config.call_auction_start_time,
+        "CALL_AUCTION_DECISION_START_TIME": config.call_auction_decision_start_time,
         "CALL_AUCTION_END_TIME": config.call_auction_end_time,
         "CALL_AUCTION_AUTO_INTERVAL_SECONDS": config.call_auction_auto_interval_seconds,
         "CALL_AUCTION_PRESELECT_LIMIT": config.call_auction_preselect_limit,
@@ -494,10 +495,14 @@ def _format_realtime_result(result) -> str:
 def _format_call_auction_result(result) -> str:
     """格式化集合竞价 LLM 快速选股结果。"""
 
+    summary = result.summary or {}
+    quote_count = summary.get("quoteSnapshotCount", "-")
+    llm_fallback = bool(summary.get("llmFallback"))
     return (
         f"快照={result.snapshot_time} 状态={result.status} 行情={result.quote_count} "
         f"有效={result.valid_quote_count} 规则候选={result.candidate_count} "
         f"LLM通过={result.pick_count} LLM成功={result.llm_success} "
+        f"LLM降级={llm_fallback} 融合快照={quote_count} "
         f"跳过={result.skipped} {result.skip_reason or result.error_message}"
     )
 

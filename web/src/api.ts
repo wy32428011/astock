@@ -117,9 +117,13 @@ export type RealtimeRunResult = {
 export type CallAuctionMarketStatus = {
   now: string;
   marketOpen: boolean;
-  session: 'call_auction' | 'closed' | string;
+  collectOpen: boolean;
+  decisionOpen: boolean;
+  session: 'pre_call_auction' | 'call_auction' | 'closed' | string;
   reason: string;
   window: string;
+  collectWindow: string;
+  decisionWindow: string;
 };
 
 export type CallAuctionRun = {
@@ -169,10 +173,19 @@ export type CallAuctionPick = {
   risk: string;
 };
 
+export type CallAuctionQuoteSummary = {
+  quoteCount: number;
+  validPriceCount: number;
+  firstSampleTime: string | null;
+  latestSampleTime: string | null;
+  totalSampleCount: number;
+};
+
 export type CallAuctionDashboard = {
   latestRun: CallAuctionRun | null;
   picks: CallAuctionPick[];
   marketStatus: CallAuctionMarketStatus;
+  quoteSummary: CallAuctionQuoteSummary;
   autoIntervalSeconds: number;
 };
 
